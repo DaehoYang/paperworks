@@ -1,0 +1,21 @@
+task: trip_receipt
+
+required_fields:
+  - generated
+  - total_price
+  - origin
+  - destination
+
+integrity_checks:
+  - name: generated_datetime_valid
+  - name: total_price_positive
+  - name: has_origin_destination
+  - name: route_has_seoul_endpoint
+  - name: pair_exists
+  - name: return_within_days
+    max_days: 2
+
+fallback:
+  order:
+    - ocr_litellm
+    - codex

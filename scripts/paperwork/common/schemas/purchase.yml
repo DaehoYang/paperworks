@@ -1,0 +1,36 @@
+task: purchase_quote
+
+required_fields:
+  - items
+  - totals.total_price
+
+items:
+  required_fields:
+    - name
+    - quantity
+    - unit_price_raw
+    - amount_raw
+  numeric_fields:
+    - quantity
+    - unit_price_raw
+    - amount_raw
+
+normalization:
+  unit_price: vat_included_single
+  supply_price: vat_excluded_quantity_total
+  vat_rate: 0.1
+
+integrity_checks:
+  - name: items_present
+  - name: quantity_positive
+  - name: raw_prices_present
+  - name: totals_match
+    tolerance: 1000
+  - name: normalized_total_matches_quote_total
+    tolerance_ratio: 0.02
+
+fallback:
+  order:
+    - pdf_text
+    - ocr_litellm
+    - codex

@@ -4,6 +4,16 @@ project:
   연구과제명: "2025-2 가천바이오나노연구원 운영비"
   연구기간: "25-09-01 ~ 26-08-31"
 
+trip:
+  principal_investigator:
+    department: "식품생명공학과"
+    name: "박영서"
+  traveler:
+    name: "양대호"
+    participation: "참여연구원"
+    birthdate: "90.06.18"
+    account: "110-277-840817"
+
 members:
   - name: "양대호"
     department: "물리학과"
@@ -14,15 +24,15 @@ members:
   - name: "송영빈"
     department: "물리학과"
     position: "대학원생"
-  - name: "장하나"
-    department: "물리학과"
-    position: "대학원생"
   - name: "Balakiruthika Periyasamy"
     department: "물리학과"
     position: "대학원생"
   - name: "Tayyab Raza"
     department: "물리학과"
     position: "조교수"
+  - name: "장하나"
+    department: "물리학과"
+    position: "학부생"
   # - name: "김예진"
   #   department: "컴퓨터공학부"
   #   position: "학부생"
@@ -130,6 +140,13 @@ external_topic_order:
 
 attendee_rules:
   price_per_person: 30000
+  min_attendees: 2
   max_attendees: 10
   fixed_first_attendee: "양대호"
-
+  max_attendee_store_exceptions:
+    - store_name_contains: "쩡이네"
+      min_total_price: 100000
+    - store_name_contains: "쟁이네"
+      min_total_price: 100000
+    - store_name_contains: "평이네"
+      min_total_price: 100000

@@ -1,0 +1,38 @@
+task: meeting_receipt
+
+required_fields:
+  - generated
+  - total_price
+  - receipt_type
+
+receipt_types:
+  known:
+    - food_drink
+    - restaurant
+    - cafe
+    - meal
+    - drink
+    - transport
+    - lodging
+    - office_supply
+    - medical
+    - fuel
+    - other
+    - unknown
+  meeting:
+    - food_drink
+    - restaurant
+    - cafe
+    - meal
+    - drink
+
+integrity_checks:
+  - name: generated_datetime_valid
+  - name: total_price_positive
+  - name: receipt_type_known
+  - name: food_drink_has_store_or_address
+
+fallback:
+  order:
+    - ocr_litellm
+    - codex
