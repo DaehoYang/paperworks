@@ -20,6 +20,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import xlwt
+import yaml
 from PIL import Image, ImageOps
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, BooleanObject, DictionaryObject, NameObject, TextStringObject
@@ -42,6 +43,7 @@ DEFAULT_PURCHASE_DIR = PURCHASE_DIR / "260401_optics"
 DEFAULT_FORM_TEMPLATE = ASSETS_DIR / "물품검수확인서_입력가능.pdf"
 DEFAULT_OCR_API_URL = "https://dhlab.gachon.ac.kr/services/rag/ocr"
 DEFAULT_LITELLM_BASE_URL = "https://dhlab.gachon.ac.kr/services/litellm/v1"
+DEFAULT_PROJECTS_YML = WORKSPACE_DIR / "projects.yml"
 
 ITEM_LINE = re.compile(
     r"^\s*(?P<number>\d+)\s*(?P<desc>.*?)\s{2,}"
@@ -582,9 +584,23 @@ def find_quote_file(purchase_dir: Path) -> Path:
         and path.suffix.lower() in QUOTE_EXTENSIONS
         and any(token in path.stem for token in QUOTE_NAME_TOKENS)
     ]
-    if not candidates:
-        raise FileNotFoundError(f"No quote file containing 견적/견적서 found in {purchase_dir}")
-    return sorted(candidates, key=natural_key)[0]
+    if candidates:
+        return sorted(candidates, key=natural_key)[0]
+
+    pdf_candidates = [
+        path
+        for path in purchase_dir.iterdir()
+        if path.is_file() and not path.name.startswith(".") and path.suffix.lower() == ".pdf"
+    ]
+    for path in sorted(pdf_candidates, key=natural_key):
+        try:
+            text = doc_reader.pdf_text(path)
+        except Exception:
+            continue
+        compact = re.sub(r"\s+", "", text).upper()
+        if "견적서" in compact or "QUOTATION" in compact:
+            return path
+    raise FileNotFoundError(f"No quote PDF containing 견적/견적서/QUOTATION found in {purchase_dir}")
 
 
 def find_images_dir(purchase_dir: Path) -> Path:
@@ -592,6 +608,8 @@ def find_images_dir(purchase_dir: Path) -> Path:
         path = purchase_dir / name
         if path.is_dir() and image_paths(path):
             return path
+    if image_paths(purchase_dir):
+        return purchase_dir
     raise FileNotFoundError(f"No image folder with images found. Tried: {', '.join(IMAGE_DIR_CANDIDATES)} in {purchase_dir}")
 
 
@@ -639,6 +657,26 @@ def form_values(page_items: list[PurchaseItem], inspection_date: date, inspector
     for idx, item in enumerate(page_items, 1):
         values[f"품명{idx}"] = item.name
     return values
+
+
+def load_projects_config(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid projects config: {path}")
+    return data
+
+
+def project_defaults(projects_yml: Path, project_id: str) -> dict[str, str]:
+    config = load_projects_config(projects_yml)
+    defaults = config.get("defaults") or {}
+    if not isinstance(defaults, dict):
+        raise ValueError(f'"defaults" in {projects_yml} must be a mapping')
+    projects = config.get("projects") or {}
+    if project_id and isinstance(projects, dict) and project_id not in projects:
+        raise ValueError(f"Project {project_id} was not found in {projects_yml}")
+    return {str(key): str(value) for key, value in defaults.items() if value is not None}
 
 
 def set_need_appearances(writer: PdfWriter, value: bool) -> None:
@@ -730,8 +768,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--items", default="items.xls")
     parser.add_argument("--images", help="Image folder name. If omitted, imgs, imgs1, then img are tried.")
     parser.add_argument("--output", default="물품검수확인서_작성.pdf")
+    parser.add_argument("--projects-yml", type=Path, default=DEFAULT_PROJECTS_YML)
+    parser.add_argument("--project-id", help="Project key/number in projects.yml. Used for shared defaults such as inspector.")
     parser.add_argument("--inspection-date", type=parse_date, default=date.today())
-    parser.add_argument("--inspector", default="양대호")
+    parser.add_argument("--inspector")
     parser.add_argument("--parse-engine", choices=["auto", "pdf-text", "ocr-litellm", "codex"], default="auto")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--ocr-api-url", default=os.environ.get("DHLAB_OCR_API_URL", DEFAULT_OCR_API_URL))
@@ -752,6 +792,8 @@ def resolve_template_path(path: Path) -> Path:
 
 def main() -> None:
     args = parse_args()
+    defaults = project_defaults(args.projects_yml, args.project_id or "") if args.projects_yml else {}
+    inspector = args.inspector or defaults.get("inspector") or "양대호"
     purchase_dir = args.purchase_dir
     quote_pdf = purchase_dir / args.quote if args.quote else find_quote_file(purchase_dir)
     template_pdf = purchase_dir / args.template
@@ -778,13 +820,14 @@ def main() -> None:
     )
     write_items_xls(items, items_path)
     images = image_paths(images_dir)
-    generate_inspection_pdf(form_pdf, output_pdf, items, images, args.inspection_date, args.inspector)
+    generate_inspection_pdf(form_pdf, output_pdf, items, images, args.inspection_date, inspector)
 
     print(f"items: {items_path}")
     print(f"form: {form_pdf}")
     print(f"inspection_pdf: {output_pdf}")
     print(f"items_count: {len(items)}")
     print(f"images_count: {len(images)}")
+    print(f"inspector: {inspector}")
     print(f"price_mode: {price_mode}")
     print(f"quote_totals: supply={totals.supply_price}, vat={totals.vat}, total={totals.total_price}")
     print(f"normalized_totals: supply={sum(item.supply_price for item in items)}, vat={sum(item.vat for item in items)}, total={sum(item.total_price for item in items)}")

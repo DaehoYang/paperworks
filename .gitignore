@@ -1,3 +1,11 @@
 meeting/*
 purchase/*
 *.pyc
+__pycache__/
+secret.json
+credentials.json
+projects.yml
+.env
+scripts/upload/node_modules/
+scripts/gui/jobs/
+scripts/gui/trash/

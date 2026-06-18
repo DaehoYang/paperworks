@@ -1,0 +1,5 @@
+credentials.json
+token.json
+collect.log
+__pycache__/
+tests/__pycache__/
