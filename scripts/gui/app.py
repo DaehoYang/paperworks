@@ -29,6 +29,8 @@ def init_page() -> None:
         .block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
         div[data-testid="stMetric"] { border: 1px solid #e5e7eb; padding: 0.6rem 0.8rem; border-radius: 6px; }
         .small-muted { color: #6b7280; font-size: 0.86rem; }
+        .explorer-path { color: #374151; font-size: 0.9rem; margin-bottom: 0.25rem; }
+        .explorer-thumb-name { font-size: 0.82rem; line-height: 1.2; overflow-wrap: anywhere; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -86,6 +88,27 @@ def preview_file(path: Path) -> None:
         st.info("이 파일 형식은 미리보기를 제공하지 않습니다.")
 
 
+def file_actions(path: Path, key_prefix: str) -> None:
+    st.subheader("파일 작업")
+    new_name = st.text_input("새 파일명", value=path.name, key=f"{key_prefix}-rename-input")
+    if st.button("이름 변경", key=f"{key_prefix}-rename"):
+        try:
+            target = files.rename_file(path, new_name)
+            st.success(f"변경됨: {target.name}")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+    st.divider()
+    confirm = st.checkbox("선택 파일을 trash로 이동", key=f"{key_prefix}-trash-confirm")
+    if st.button("Trash로 이동", disabled=not confirm, key=f"{key_prefix}-trash"):
+        try:
+            target = files.trash_file(path)
+            st.warning(f"이동됨: {target}")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+
 def file_management_panel(infos: list[files.FileInfo], key_prefix: str) -> None:
     if not infos:
         st.info("표시할 파일이 없습니다.")
@@ -98,24 +121,239 @@ def file_management_panel(infos: list[files.FileInfo], key_prefix: str) -> None:
     with left:
         preview_file(path)
     with right:
-        st.subheader("파일 작업")
-        new_name = st.text_input("새 파일명", value=path.name, key=f"{key_prefix}-rename-input")
-        if st.button("이름 변경", key=f"{key_prefix}-rename"):
+        file_actions(path, key_prefix)
+
+
+def entry_sort_key(entry: dict[str, object], sort_mode: str) -> object:
+    path = resolve_repo_path(str(entry["경로"]))
+    stat = path.stat()
+    if sort_mode == "수정일 최신순":
+        return (0 if path.is_dir() else 1, -stat.st_mtime, path.name.casefold())
+    if sort_mode == "수정일 오래된순":
+        return (0 if path.is_dir() else 1, stat.st_mtime, path.name.casefold())
+    if sort_mode == "이름순":
+        return (0 if path.is_dir() else 1, path.name.casefold())
+    if sort_mode == "크기 큰순":
+        return (0 if path.is_dir() else 1, -stat.st_size, path.name.casefold())
+    return (0 if path.is_dir() else 1, stat.st_size, path.name.casefold())
+
+
+def filter_entries(entries: list[dict[str, object]], query: str) -> list[dict[str, object]]:
+    if not query:
+        return entries
+    needle = query.casefold()
+    return [
+        entry
+        for entry in entries
+        if needle in str(entry["이름"]).casefold() or needle in str(entry["경로"]).casefold() or needle in str(entry["종류"]).casefold()
+    ]
+
+
+def entry_dataframe(entries: list[dict[str, object]]) -> pd.DataFrame:
+    rows = []
+    for entry in entries:
+        path = resolve_repo_path(str(entry["경로"]))
+        rows.append(
+            {
+                "종류": "폴더" if path.is_dir() else "파일",
+                "이름": str(entry["이름"]),
+                "수정일": str(entry["수정일"]),
+                "크기": str(entry["크기"]),
+                "경로": str(entry["경로"]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def selected_dataframe_path(entries: list[dict[str, object]], key: str, height: int = 520) -> Path | None:
+    df = entry_dataframe(entries)
+    state = st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        height=height,
+        key=key,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "종류": st.column_config.TextColumn("종류", width="small"),
+            "이름": st.column_config.TextColumn("이름", width="medium"),
+            "수정일": st.column_config.TextColumn("수정일", width="medium"),
+            "크기": st.column_config.TextColumn("크기", width="small"),
+            "경로": st.column_config.TextColumn("경로", width="large"),
+        },
+    )
+    rows = state.selection.rows if state and state.selection else []
+    if not rows:
+        return None
+    return resolve_repo_path(str(entries[rows[0]]["경로"]))
+
+
+def breadcrumb(root_path: Path, current_path: Path) -> None:
+    relative = current_path.relative_to(root_path)
+    parts = [] if str(relative) == "." else list(relative.parts)
+    cols = st.columns(min(len(parts) + 1, 6))
+    if cols[0].button(root_path.name, key="crumb-root"):
+        st.session_state["explorer-current"] = files.repo_relative(root_path)
+        st.rerun()
+    built = root_path
+    for index, part in enumerate(parts[:5], 1):
+        built = built / part
+        if cols[index].button(part, key=f"crumb-{index}-{part}"):
+            st.session_state["explorer-current"] = files.repo_relative(built)
+            st.rerun()
+
+
+def thumbnail_grid(paths: list[Path]) -> Path | None:
+    if not paths:
+        st.info("썸네일로 표시할 이미지 파일이 없습니다.")
+        return None
+    selected: Path | None = None
+    columns = st.columns(4)
+    for index, path in enumerate(paths[:48]):
+        with columns[index % 4]:
             try:
-                target = files.rename_file(path, new_name)
-                st.success(f"변경됨: {target.name}")
+                st.image(str(path), use_container_width=True)
+            except Exception:
+                st.caption("미리보기 실패")
+            st.markdown(f'<div class="explorer-thumb-name">{path.name}</div>', unsafe_allow_html=True)
+            if st.button("선택", key=f"thumb-select-{files.repo_relative(path)}"):
+                selected = path
+    if len(paths) > 48:
+        st.caption(f"이미지 {len(paths) - 48}개는 생략되었습니다. 검색이나 리스트 보기를 사용하세요.")
+    return selected
+
+
+def explorer_page() -> None:
+    st.title("Explorer")
+    roots = {
+        "purchase": PURCHASE_DIR,
+        "meeting": MEETING_DIR,
+    }
+    root_name = st.sidebar.selectbox("Explorer root", list(roots), key="explorer-root")
+    root_path = roots[root_name]
+    directories = files.list_directories(root_path)
+    if not directories:
+        st.info(f"`{root_name}` 폴더가 없습니다.")
+        return
+
+    previous = st.session_state.get("explorer-current")
+    if previous:
+        try:
+            current_path = resolve_repo_path(previous)
+        except Exception:
+            current_path = root_path
+    else:
+        current_path = root_path
+    if current_path not in directories:
+        current_path = root_path
+
+    dir_labels = [files.repo_relative(path) for path in directories]
+    current_label = files.repo_relative(current_path)
+    selected_label = st.sidebar.selectbox("폴더", dir_labels, index=dir_labels.index(current_label), key="explorer-dir")
+    current_path = resolve_repo_path(selected_label)
+    st.session_state["explorer-current"] = selected_label
+
+    breadcrumb(root_path, current_path)
+    st.markdown(f'<div class="explorer-path">{selected_label}</div>', unsafe_allow_html=True)
+
+    toolbar_left, toolbar_mid, toolbar_right = st.columns([2, 1, 1])
+    with toolbar_left:
+        query = st.text_input("검색", key="explorer-search", placeholder="현재 root 안의 파일명/경로 검색")
+    with toolbar_mid:
+        sort_mode = st.selectbox("정렬", ["수정일 최신순", "이름순", "수정일 오래된순", "크기 큰순", "크기 작은순"], key="explorer-sort")
+    with toolbar_right:
+        view_mode = st.segmented_control("보기", ["리스트", "썸네일"], default="리스트", key="explorer-view")
+
+    control_col, list_col, preview_col = st.columns([1.1, 2.2, 1.4], gap="large")
+    with control_col:
+        st.subheader("작업")
+        parent = current_path.parent
+        can_go_up = root_path.resolve() in parent.resolve().parents or parent.resolve() == root_path.resolve()
+        if st.button("상위 폴더", disabled=not can_go_up, use_container_width=True):
+            st.session_state["explorer-current"] = files.repo_relative(parent)
+            st.rerun()
+        with st.form("explorer-create-folder"):
+            new_folder = st.text_input("새 폴더명")
+            submitted = st.form_submit_button("폴더 생성", use_container_width=True)
+        if submitted:
+            try:
+                created = files.create_directory(current_path, new_folder)
+                st.success(f"생성됨: {files.repo_relative(created)}")
+                st.session_state["explorer-current"] = files.repo_relative(created)
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+
         st.divider()
-        confirm = st.checkbox("선택 파일을 trash로 이동", key=f"{key_prefix}-trash-confirm")
-        if st.button("Trash로 이동", disabled=not confirm, key=f"{key_prefix}-trash"):
+        st.subheader("Drag Drop Upload")
+        uploaded = st.file_uploader(
+            "현재 폴더에 파일 끌어놓기",
+            accept_multiple_files=True,
+            type=[ext.lstrip(".") for ext in sorted(files.UPLOAD_EXTENSIONS)],
+            key="explorer-uploader",
+        )
+        if st.button("현재 폴더에 저장", disabled=not uploaded, use_container_width=True):
             try:
-                target = files.trash_file(path)
-                st.warning(f"이동됨: {target}")
+                saved = files.save_uploads_to_directory(current_path, uploaded or [])
+                st.success(f"{len(saved)}개 파일 저장")
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+
+    selected_current_path: Path | None = None
+    selected_all_path: Path | None = None
+    with list_col:
+        st.subheader("파일")
+        tab_current, tab_all = st.tabs(["현재 폴더", "전체"])
+        with tab_current:
+            entries = files.list_directory_entries(current_path)
+            entries = filter_entries(entries, query)
+            entries = sorted(entries, key=lambda entry: entry_sort_key(entry, sort_mode))
+            st.caption(f"{len(entries)}개 항목")
+            if not entries:
+                st.info("표시할 항목이 없습니다.")
+            elif view_mode == "썸네일":
+                image_paths = [resolve_repo_path(str(entry["경로"])) for entry in entries if resolve_repo_path(str(entry["경로"])).suffix.lower() in files.IMAGE_EXTENSIONS]
+                selected_current_path = thumbnail_grid(image_paths)
+            else:
+                selected_current_path = selected_dataframe_path(entries, "explorer-current-table")
+
+        with tab_all:
+            all_entries = [
+                {
+                    "종류": "파일",
+                    "이름": info.name,
+                    "경로": info.rel_path,
+                    "크기": files.human_size(info.size),
+                    "수정일": info.modified,
+                }
+                for info in files.list_files(root_path, recursive=True)
+            ]
+            all_entries = filter_entries(all_entries, query)
+            all_entries = sorted(all_entries, key=lambda entry: entry_sort_key(entry, sort_mode))
+            st.caption(f"{len(all_entries)}개 파일")
+            if not all_entries:
+                st.info("표시할 파일이 없습니다.")
+            elif view_mode == "썸네일":
+                image_paths = [resolve_repo_path(str(entry["경로"])) for entry in all_entries if resolve_repo_path(str(entry["경로"])).suffix.lower() in files.IMAGE_EXTENSIONS]
+                selected_all_path = thumbnail_grid(image_paths)
+            else:
+                selected_all_path = selected_dataframe_path(all_entries, "explorer-all-table")
+
+    with preview_col:
+        st.subheader("Preview")
+        selected_path = selected_current_path or selected_all_path
+        if selected_path is None:
+            st.info("리스트에서 한 행을 선택하세요.")
+        elif selected_path.is_dir():
+            st.write(f"`{files.repo_relative(selected_path)}`")
+            if st.button("폴더 열기", use_container_width=True):
+                st.session_state["explorer-current"] = files.repo_relative(selected_path)
+                st.rerun()
+        elif selected_path.is_file():
+            preview_file(selected_path)
+            file_actions(selected_path, "explorer-selected-file")
 
 
 def purchase_page(project: projects.Project | None) -> None:
@@ -349,12 +587,14 @@ def settings_page(project: projects.Project | None) -> None:
 def main() -> None:
     init_page()
     project = selected_project()
-    page = st.sidebar.radio("화면", ["Purchase", "Meeting", "Jobs", "Settings"], index=0)
+    page = st.sidebar.radio("화면", ["Purchase", "Explorer", "Meeting", "Jobs", "Settings"], index=0)
     st.sidebar.divider()
     if st.sidebar.button("새로고침"):
         st.rerun()
     if page == "Purchase":
         purchase_page(project)
+    elif page == "Explorer":
+        explorer_page()
     elif page == "Meeting":
         meeting_page()
     elif page == "Jobs":

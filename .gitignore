@@ -9,3 +9,6 @@ projects.yml
 scripts/upload/node_modules/
 scripts/gui/jobs/
 scripts/gui/trash/
+scripts/gui/frontend/node_modules/
+scripts/gui/frontend/dist/
+scripts/gui/frontend/*.tsbuildinfo

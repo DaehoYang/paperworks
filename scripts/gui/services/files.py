@@ -81,6 +81,32 @@ def list_purchase_cases() -> list[Path]:
     )
 
 
+def should_hide_path(path: Path) -> bool:
+    hidden_names = {"__pycache__", ".git", ".trash", "jobs", "trash"}
+    return any(part.startswith(".") or part in hidden_names for part in path.parts)
+
+
+def list_directories(base: Path, recursive: bool = True) -> list[Path]:
+    base = assert_within_root(base)
+    if not base.exists():
+        return []
+    directories = [base]
+    iterator = base.rglob("*") if recursive else base.iterdir()
+    for path in iterator:
+        if path.is_dir() and not should_hide_path(path.relative_to(base)):
+            directories.append(path)
+    return sorted(set(directories), key=natural_key)
+
+
+def create_directory(parent: Path, name: str) -> Path:
+    dirname = validate_case_name(name)
+    target = assert_within_root(parent / dirname)
+    if target.exists():
+        raise FileExistsError(target)
+    target.mkdir(parents=True)
+    return target
+
+
 def create_purchase_case(name: str) -> Path:
     case_name = validate_case_name(name)
     case_dir = assert_within_root(PURCHASE_DIR / case_name)
@@ -114,9 +140,41 @@ def list_files(base: Path, recursive: bool = True) -> list[FileInfo]:
     files = [
         file_info(path)
         for path in iterator
-        if path.is_file() and ".trash" not in path.parts and "jobs" not in path.parts
+        if path.is_file() and not should_hide_path(path.relative_to(base))
     ]
     return sorted(files, key=lambda item: natural_key(item.path))
+
+
+def list_directory_entries(base: Path) -> list[dict[str, object]]:
+    base = assert_within_root(base)
+    if not base.exists():
+        return []
+    entries: list[dict[str, object]] = []
+    for path in sorted(base.iterdir(), key=natural_key):
+        if should_hide_path(path.relative_to(base)):
+            continue
+        stat = path.stat()
+        if path.is_dir():
+            entries.append(
+                {
+                    "종류": "폴더",
+                    "이름": path.name,
+                    "경로": repo_relative(path),
+                    "크기": "",
+                    "수정일": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+        elif path.is_file():
+            entries.append(
+                {
+                    "종류": "파일",
+                    "이름": path.name,
+                    "경로": repo_relative(path),
+                    "크기": human_size(stat.st_size),
+                    "수정일": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+    return entries
 
 
 def unique_path(path: Path) -> Path:
@@ -193,6 +251,10 @@ def save_purchase_uploads(case_dir: Path, uploaded_files: list[BinaryIO], doc_ty
 
 def save_meeting_receipts(uploaded_files: list[BinaryIO]) -> list[Path]:
     target_dir = MEETING_DIR / "receipt"
+    return [write_uploaded_file(file, target_dir) for file in uploaded_files]
+
+
+def save_uploads_to_directory(target_dir: Path, uploaded_files: list[BinaryIO]) -> list[Path]:
     return [write_uploaded_file(file, target_dir) for file in uploaded_files]
 
 
