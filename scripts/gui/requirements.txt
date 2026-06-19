@@ -1,3 +1,7 @@
 streamlit
 pandas
 pyyaml
+pypdf
+reportlab
+xlrd
+xlwt

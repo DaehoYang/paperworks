@@ -26,7 +26,7 @@ from scripts.documents.db import (
     upsert_purchase_case,
 )
 from scripts.documents.purchase_scan import scan_purchase_root
-from scripts.documents.vendors import normalize_vendor, parse_case_name, safe_name
+from scripts.documents.vendors import canonical_vendor, normalize_vendor, parse_case_name, safe_name
 
 
 DEFAULT_DB = WORKSPACE_DIR / "purchase" / "documents.sqlite3"
@@ -152,7 +152,7 @@ def yymmdd(issue_date: str | None) -> str:
 
 
 def target_dir_for_tax(tax_doc: dict, purchase_root: Path) -> Path:
-    vendor = normalize_vendor(tax_doc.get("vendor")) or safe_name(tax_doc.get("vendor") or "미상")
+    vendor = normalize_vendor(canonical_vendor(tax_doc.get("vendor"))) or safe_name(tax_doc.get("vendor") or "미상")
     return purchase_root / f"{yymmdd(tax_doc.get('issue_date'))}_{safe_name(vendor)}"
 
 
@@ -183,7 +183,7 @@ def load_existing_tax_files(purchase_root: Path) -> list[ExistingTax]:
                 ExistingTax(
                     path=paths,
                     case_dir=case.path,
-                    normalized_vendor=parsed.normalized_vendor,
+                    normalized_vendor=normalize_vendor(canonical_vendor(parsed.vendor or parsed.normalized_vendor)),
                     amount=fields.amount,
                     item_prices=fields.item_prices,
                 )
@@ -192,7 +192,7 @@ def load_existing_tax_files(purchase_root: Path) -> list[ExistingTax]:
 
 
 def tax_already_in_purchase(tax_doc: dict, existing_tax_files: list[ExistingTax]) -> ExistingTax | None:
-    vendor = normalize_vendor(tax_doc.get("vendor"))
+    vendor = normalize_vendor(canonical_vendor(tax_doc.get("vendor")))
     amount = tax_doc.get("amount")
     item_prices = tuple(int(value) for value in parse_json_list(tax_doc.get("item_prices") or tax_doc.get("item_prices_json")))
     for existing in existing_tax_files:
@@ -286,7 +286,8 @@ def source_should_move(source: Path, target_dir: Path, move_sources: bool, doc_t
 
 
 def vendor_dir(vendor_root: Path, vendor: str | None) -> Path:
-    normalized = normalize_vendor(vendor) or safe_name(vendor or "미상")
+    canonical = canonical_vendor(vendor) or vendor
+    normalized = normalize_vendor(canonical) or safe_name(canonical or "미상")
     return vendor_root / safe_name(normalized)
 
 
@@ -308,7 +309,7 @@ def load_vendor_docs(vendor_root: Path) -> list[dict]:
 def vendor_docs_by_vendor(vendor_root: Path) -> dict[str, dict[str, dict]]:
     result: dict[str, dict[str, dict]] = {}
     for doc in load_vendor_docs(vendor_root):
-        vendor = normalize_vendor(doc.get("normalized_vendor") or doc.get("vendor"))
+        vendor = normalize_vendor(canonical_vendor(doc.get("vendor") or doc.get("normalized_vendor")))
         doc_type = doc.get("doc_type")
         if not vendor or doc_type not in VENDOR_DOC_TYPES:
             continue
@@ -326,7 +327,8 @@ def copy_vendor_docs_to_purchase(
     if not vendor_docs:
         return copied
     for case in scan_purchase_root(purchase_root):
-        docs_for_vendor = vendor_docs.get(case.normalized_vendor)
+        case_vendor = normalize_vendor(canonical_vendor(case.vendor or case.normalized_vendor))
+        docs_for_vendor = vendor_docs.get(case_vendor)
         if not docs_for_vendor:
             continue
         existing_doc_types = set(case.local_docs)
@@ -345,10 +347,11 @@ def copy_vendor_docs_to_purchase(
 
 
 def card_case_baseline(case) -> dict:
+    canonical = canonical_vendor(case.vendor or case.normalized_vendor)
     return {
         "doc_type": "receipt",
-        "vendor": case.vendor,
-        "normalized_vendor": case.normalized_vendor,
+        "vendor": canonical or case.vendor,
+        "normalized_vendor": normalize_vendor(canonical or case.normalized_vendor),
         "issue_date": case.case_date,
         "document_number": case.document_number,
         "item_code": case.item_code,
@@ -414,11 +417,13 @@ def fill_existing_card_payment_cases(
 
 def vendor_metadata(source: Path, doc_type: str, vendor: str) -> dict:
     now = datetime.now(timezone.utc).isoformat()
+    canonical = canonical_vendor(vendor) or vendor
     return {
         "doc_type": doc_type,
         "all_doc_types": [doc_type],
-        "vendor": vendor,
-        "normalized_vendor": normalize_vendor(vendor),
+        "vendor": canonical,
+        "original_vendor": vendor if canonical != vendor else None,
+        "normalized_vendor": normalize_vendor(canonical),
         "issue_date": None,
         "amount": None,
         "currency": "KRW",
@@ -511,8 +516,8 @@ def apply_plan(plan: PlacementPlan, db_path: Path | None, *, move_sources: bool 
                 "case_dir": str(target_dir),
                 "case_name": target_dir.name,
                 "case_date": plan.tax_doc.get("issue_date"),
-                "vendor": plan.tax_doc.get("vendor"),
-                "normalized_vendor": normalize_vendor(plan.tax_doc.get("vendor")),
+                "vendor": canonical_vendor(plan.tax_doc.get("vendor")) or plan.tax_doc.get("vendor"),
+                "normalized_vendor": normalize_vendor(canonical_vendor(plan.tax_doc.get("vendor")) or plan.tax_doc.get("vendor")),
                 "document_number": plan.tax_doc.get("document_number"),
                 "item_code": plan.tax_doc.get("item_code"),
                 "amount": plan.tax_doc.get("amount"),
@@ -537,8 +542,8 @@ def sync_db_status(plans: list[PlacementPlan], db_path: Path) -> None:
                 "case_dir": str(plan.target_dir),
                 "case_name": plan.target_dir.name,
                 "case_date": plan.tax_doc.get("issue_date"),
-                "vendor": plan.tax_doc.get("vendor"),
-                "normalized_vendor": normalize_vendor(plan.tax_doc.get("vendor")),
+                "vendor": canonical_vendor(plan.tax_doc.get("vendor")) or plan.tax_doc.get("vendor"),
+                "normalized_vendor": normalize_vendor(canonical_vendor(plan.tax_doc.get("vendor")) or plan.tax_doc.get("vendor")),
                 "document_number": plan.tax_doc.get("document_number"),
                 "item_code": plan.tax_doc.get("item_code"),
                 "amount": plan.tax_doc.get("amount"),

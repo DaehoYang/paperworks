@@ -49,6 +49,7 @@ DEFAULT_QUERIES = [
 ]
 
 TAX_ATTACHMENT_EXTS = {".pdf", ".xml", ".html", ".htm"}
+IMAGE_ATTACHMENT_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 ALLOWED_LINK_HOSTS = ("l.ecount.com", "hometax.go.kr", "srtk.hometax.go.kr")
 
 
@@ -406,6 +407,16 @@ def link_to_pdf(url: str, target: Path) -> None:
         browser.close()
 
 
+def image_to_pdf(source: Path, target: Path) -> None:
+    from PIL import Image, ImageOps
+
+    image = ImageOps.exif_transpose(Image.open(source))
+    if image.mode in {"RGBA", "LA", "P"}:
+        image = image.convert("RGB")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    image.save(target, "PDF", resolution=100.0)
+
+
 def convert_to_pdf(source: Path, target: Path, hometax_password: str | None) -> None:
     suffix = source.suffix.lower()
     if suffix == ".pdf":
@@ -414,6 +425,8 @@ def convert_to_pdf(source: Path, target: Path, hometax_password: str | None) -> 
         html_to_pdf(source, target, hometax_password=hometax_password)
     elif suffix == ".xml":
         xml_to_pdf(source, target)
+    elif suffix in IMAGE_ATTACHMENT_EXTS:
+        image_to_pdf(source, target)
     else:
         raise RuntimeError(f"Unsupported tax invoice attachment type: {source.name}")
 

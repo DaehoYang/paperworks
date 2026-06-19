@@ -72,6 +72,12 @@ export type DashboardData = {
   purchaseCases: Array<{
     name: string;
     path: string;
+    status: "incomplete" | "ready" | "finished";
+    workflowStatus: "no images" | "images found" | "generated" | "uploaded";
+    statusLabel: string;
+    imageCount: number;
+    generated: boolean;
+    uploaded: boolean;
     missing: string[];
     required: Record<string, string[]>;
     fileCount: number;
@@ -83,4 +89,90 @@ export type DashboardData = {
 
 export async function loadDashboard(): Promise<DashboardData> {
   return requestJson<DashboardData>("api/dashboard");
+}
+
+export type ActionName = "collect_docs" | "generate_purchase_docs" | "upload_purchases" | "process_receipts";
+
+export type JobSummary = {
+  id: string;
+  kind?: string;
+  state?: string;
+  returncode?: number | null;
+  createdAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  caseDir?: string;
+  count?: number;
+};
+
+export type ActionResult = {
+  jobs: JobSummary[];
+  skipped?: Array<{ case: string; reason: string }>;
+};
+
+export async function startAction(action: ActionName): Promise<ActionResult> {
+  return requestJson<ActionResult>(`api/actions/${action}`, { method: "POST" });
+}
+
+export async function loadJobs(): Promise<JobSummary[]> {
+  const data = await requestJson<{ jobs: JobSummary[] }>("api/jobs");
+  return data.jobs;
+}
+
+export async function loadJobLog(jobId: string, stream: "stdout" | "stderr"): Promise<string> {
+  const data = await requestJson<{ text: string }>(`api/jobs/${encodeURIComponent(jobId)}/${stream}`);
+  return data.text;
+}
+
+
+export type PurchaseImageInfo = {
+  name: string;
+  path: string;
+  itemNumber?: number | null;
+  size: number;
+  updatedAt: string;
+};
+
+export type PurchaseImageHelperData = {
+  casePath: string;
+  caseName: string;
+  quotePath?: string | null;
+  itemCount: number;
+  images: PurchaseImageInfo[];
+};
+
+export async function loadPurchaseImageHelper(casePath: string): Promise<PurchaseImageHelperData> {
+  return requestJson<PurchaseImageHelperData>(`api/purchase-image-helper?casePath=${encodeURIComponent(casePath)}`);
+}
+
+export async function uploadPurchaseImages(casePath: string, files: File[], itemNumbers: number[]): Promise<{ uploaded: PurchaseImageInfo[]; archived: string[]; itemCount: number }> {
+  const form = new FormData();
+  form.append("casePath", casePath);
+  form.append("itemNumbers", JSON.stringify(itemNumbers));
+  for (const file of files) {
+    form.append("file", file);
+  }
+  return requestJson<{ uploaded: PurchaseImageInfo[]; archived: string[]; itemCount: number }>("api/purchase-image-helper/upload", {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function deletePurchaseImage(casePath: string, path: string): Promise<{ deleted: string; archived: string }> {
+  return requestJson<{ deleted: string; archived: string }>("api/purchase-image-helper/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ casePath, path }),
+  });
+}
+
+export async function reorderPurchaseImages(
+  casePath: string,
+  assignments: Array<{ path: string; itemNumber: number }>,
+): Promise<{ images: PurchaseImageInfo[] }> {
+  return requestJson<{ images: PurchaseImageInfo[] }>("api/purchase-image-helper/reorder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ casePath, assignments }),
+  });
 }

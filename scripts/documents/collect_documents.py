@@ -20,6 +20,7 @@ from scripts.documents.amounts import extract_financial_fields_from_pdf, extract
 from scripts.documents.classifiers import (
     classify_document,
     classify_document_content,
+    document_types_from_filename,
     extract_issue_date_from_document_text,
     extract_vendor,
     extract_vendor_from_document_text,
@@ -32,7 +33,7 @@ from scripts.documents.db import (
     source_key,
     upsert_document,
 )
-from scripts.documents.vendors import normalize_vendor, safe_name
+from scripts.documents.vendors import canonical_vendor, normalize_vendor, safe_name
 
 
 DEFAULT_OUTPUT_DIR = WORKSPACE_DIR / "purchase" / ".incoming"
@@ -50,11 +51,12 @@ DOCUMENT_QUERIES = [
     'in:anywhere -in:sent -in:spam -in:trash newer_than:{newer_than} "전자(세금)계산서"',
     'in:anywhere -in:sent -in:spam -in:trash newer_than:{newer_than} has:attachment filename:pdf (견적서 OR 견적 OR quotation OR quote)',
     'in:anywhere -in:sent -in:spam -in:trash newer_than:{newer_than} has:attachment filename:pdf (거래명세서 OR "거래 명세서" OR 거명)',
-    'in:anywhere -in:sent -in:spam -in:trash newer_than:{newer_than} has:attachment filename:pdf (사업자등록증 OR "사업자 등록증")',
-    'in:anywhere -in:sent -in:spam -in:trash newer_than:{newer_than} has:attachment filename:pdf (통장사본 OR "통장 사본" OR 계좌사본 OR "계좌 사본")',
+    'in:anywhere -in:sent -in:spam -in:trash newer_than:{newer_than} has:attachment (사업자등록증 OR "사업자 등록증")',
+    'in:anywhere -in:sent -in:spam -in:trash newer_than:{newer_than} has:attachment (통장사본 OR "통장 사본" OR 계좌사본 OR "계좌 사본")',
 ]
 
-SUPPORTED_EXTENSIONS = {".pdf", ".xml", ".html", ".htm"}
+IMAGE_EXTENSIONS = tax.IMAGE_ATTACHMENT_EXTS
+SUPPORTED_EXTENSIONS = {".pdf", ".xml", ".html", ".htm", *IMAGE_EXTENSIONS}
 
 
 def query_set(newer_than: str, include_admin_mail: bool) -> list[str]:
@@ -105,11 +107,13 @@ def build_metadata(
     source_link: str | None = None,
 ) -> dict:
     financial_fields = extract_financial_fields_from_pdf(pdf_path)
+    canonical = canonical_vendor(vendor) or vendor
     return {
         "doc_type": classification.doc_type,
         "all_doc_types": list(classification.all_doc_types or (classification.doc_type,)),
-        "vendor": vendor,
-        "normalized_vendor": normalize_vendor(vendor),
+        "vendor": canonical,
+        "original_vendor": vendor if canonical != vendor else None,
+        "normalized_vendor": normalize_vendor(canonical),
         "document_number": classification.document_number,
         "item_code": classification.item_code,
         "issue_date": issue_date,
@@ -254,6 +258,8 @@ def collect(args: argparse.Namespace) -> int:
                 continue
             classification = classify_document(part.filename, subject, body_text, from_)
             if classification.doc_type == "unknown":
+                continue
+            if suffix in IMAGE_EXTENSIONS and classification.doc_type not in document_types_from_filename(part.filename):
                 continue
             if suffix in {".html", ".htm", ".xml"} and classification.doc_type != "tax_invoice":
                 continue

@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+import yaml
+
+
+WORKSPACE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_VENDOR_ALIASES = WORKSPACE_DIR / "purchase" / "vendors.yml"
 
 CORPORATE_TOKENS = (
     "주식회사",
@@ -24,6 +29,40 @@ def normalize_vendor(value: str | None) -> str:
         text = text.replace(token.lower(), "")
     text = re.sub(r"[\s()\[\]{}·.,/_\\-]+", "", text)
     return text
+
+
+def load_vendor_aliases(path: Path = DEFAULT_VENDOR_ALIASES) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    aliases = data.get("aliases") if isinstance(data, dict) else {}
+    if not isinstance(aliases, dict):
+        return {}
+    result: dict[str, str] = {}
+    for canonical, values in aliases.items():
+        canonical_name = str(canonical).strip()
+        canonical_key = normalize_vendor(canonical_name)
+        if not canonical_name or not canonical_key:
+            continue
+        result[canonical_key] = canonical_name
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            alias_key = normalize_vendor(str(value))
+            if alias_key:
+                result[alias_key] = canonical_name
+    return result
+
+
+def canonical_vendor(value: str | None, aliases_path: Path = DEFAULT_VENDOR_ALIASES) -> str:
+    if not value:
+        return ""
+    aliases = load_vendor_aliases(aliases_path)
+    normalized = normalize_vendor(value)
+    return aliases.get(normalized) or value
 
 
 def safe_name(value: str, fallback: str = "unknown") -> str:

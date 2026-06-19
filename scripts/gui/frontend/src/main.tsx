@@ -4,20 +4,30 @@ import { FileManager } from "@cubone/react-file-manager";
 import "@cubone/react-file-manager/dist/style.css";
 import "./styles.css";
 import {
+  ActionName,
   DashboardData,
   FileItem,
+  JobSummary,
+  PurchaseImageHelperData,
   createFolder,
   deletePaths,
+  deletePurchaseImage,
   downloadUrl,
   listFiles,
+  loadJobLog,
+  loadJobs,
+  loadPurchaseImageHelper,
   loadDashboard,
   movePaths,
   previewUrl,
   renamePath,
+  reorderPurchaseImages,
+  startAction,
+  uploadPurchaseImages,
 } from "./api";
 
 type ManagerFile = FileItem;
-type View = "dashboard" | "files";
+type View = "dashboard" | "files" | "jobs" | "images";
 
 function Preview({ file }: { file: ManagerFile }) {
   if (!file || file.isDirectory) return null;
@@ -45,19 +55,32 @@ function fmtDate(value?: string) {
   return new Date(value).toLocaleString();
 }
 
-function Dashboard({ data, onOpenFiles }: { data: DashboardData | null; onOpenFiles: (path?: string) => void }) {
+function Dashboard({
+  data,
+  onOpenFiles,
+  onOpenImageHelper,
+}: {
+  data: DashboardData | null;
+  onOpenFiles: (path?: string) => void;
+  onOpenImageHelper: (path: string) => void;
+}) {
   const [showAllPurchases, setShowAllPurchases] = useState(false);
   if (!data) {
     return <div className="panel empty-panel">Loading dashboard...</div>;
   }
-  const missingCases = data.purchaseCases.filter((item) => item.missing.length > 0);
-  const visiblePurchaseCases = showAllPurchases ? data.purchaseCases : missingCases;
+  const incompleteCases = data.purchaseCases.filter((item) => item.status === "incomplete");
+  const readyCases = data.purchaseCases.filter((item) => item.status === "ready");
+  const finishedCases = data.purchaseCases.filter((item) => item.status === "finished");
+  const openCases = data.purchaseCases.filter((item) => !item.uploaded);
+  const visiblePurchaseCases = showAllPurchases ? data.purchaseCases : openCases;
   return (
     <section className="dashboard">
       <div className="metric-grid">
         <div className="metric"><span>Projects</span><strong>{data.projects.length}</strong></div>
         <div className="metric"><span>Purchase cases</span><strong>{data.purchaseCases.length}</strong></div>
-        <div className="metric warn"><span>Missing docs</span><strong>{missingCases.length}</strong></div>
+        <div className="metric warn"><span>Incomplete</span><strong>{incompleteCases.length}</strong></div>
+        <div className="metric"><span>Ready</span><strong>{readyCases.length}</strong></div>
+        <div className="metric"><span>Finished</span><strong>{finishedCases.length}</strong></div>
         <div className="metric"><span>Meeting receipts</span><strong>{data.meeting.receiptCount}</strong></div>
         <div className="metric"><span>Meeting outputs</span><strong>{data.meeting.outputCount}</strong></div>
       </div>
@@ -65,24 +88,44 @@ function Dashboard({ data, onOpenFiles }: { data: DashboardData | null; onOpenFi
       <div className="dashboard-grid">
         <div className="panel">
           <div className="panel-header">
-            <h2>{showAllPurchases ? "Purchase Status" : "Missing Documents"}</h2>
+            <h2>Purchase Status</h2>
             <div className="panel-actions">
               <button onClick={() => setShowAllPurchases((value) => !value)}>
-                {showAllPurchases ? "Show missing" : "Show all"}
+                {showAllPurchases ? "진행중만" : "전체 보기"}
               </button>
-              <button onClick={() => onOpenFiles('/purchase')}>Open purchase</button>
+              <button onClick={() => onOpenFiles('/purchase')}>purchase 폴더</button>
             </div>
           </div>
-          {!showAllPurchases && missingCases.length === 0 ? <p className="muted">No filename-based missing document flags.</p> : null}
+          {!showAllPurchases && openCases.length === 0 ? <p className="muted">No open purchase cases.</p> : null}
           <div className="case-list">
-            {visiblePurchaseCases.map((item) => (
-              <button className="case-row" key={item.path} onClick={() => onOpenFiles(item.path)}>
-                <div><strong>{item.name}</strong><span>{item.fileCount} files · {fmtDate(item.updatedAt)}</span></div>
-                <em className={item.missing.length ? "badge bad" : "badge good"}>
-                  {item.missing.length ? item.missing.join(", ") : "ready"}
-                </em>
-              </button>
-            ))}
+            {visiblePurchaseCases.map((item) => {
+              const imageActionLabel = item.uploaded ? null : item.workflowStatus === "no images" ? "Upload Images" : "Edit Images";
+              return (
+                <div className="case-row" key={item.path} onClick={() => onOpenFiles(item.path)} role="button" tabIndex={0}>
+                  <div>
+                    <strong>{item.name}</strong>
+                    <span>{item.fileCount} files · {fmtDate(item.updatedAt)}</span>
+                    {item.missing.length ? <span>missing: {item.missing.join(", ")}</span> : null}
+                  </div>
+                  <div className="case-row-actions">
+                    <em className={`badge ${item.status} ${item.workflowStatus.replace(/\s+/g, "-")}`}>
+                      {item.statusLabel}
+                    </em>
+                    {imageActionLabel ? (
+                      <button
+                        className="row-action"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onOpenImageHelper(item.path);
+                        }}
+                      >
+                        {imageActionLabel}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -187,11 +230,322 @@ function FileBrowser({ initialPath }: { initialPath: string }) {
   );
 }
 
+function JobsView() {
+  const [jobs, setJobs] = useState<JobSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [selectedJob, setSelectedJob] = useState<JobSummary | null>(null);
+  const [stdout, setStdout] = useState("");
+  const [stderr, setStderr] = useState("");
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setJobs(await loadJobs());
+      setMessage("");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const selectJob = useCallback(async (job: JobSummary) => {
+    setSelectedJob(job);
+    setStdout("");
+    setStderr("");
+    try {
+      const [nextStdout, nextStderr] = await Promise.all([loadJobLog(job.id, "stdout"), loadJobLog(job.id, "stderr")]);
+      setStdout(nextStdout);
+      setStderr(nextStderr);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  return (
+    <section className="jobs-view">
+      {message && <div className="error-banner">{message}</div>}
+      <div className="panel">
+        <div className="panel-header">
+          <h2>Jobs</h2>
+          <button onClick={() => void refresh()} disabled={loading}>Refresh</button>
+        </div>
+        {jobs.length === 0 ? <p className="muted">No jobs yet.</p> : null}
+        <div className="jobs-layout">
+          <div className="jobs-list">
+            {jobs.map((job) => (
+              <button className="job-card" key={job.id} onClick={() => void selectJob(job)}>
+                <strong>{job.kind || "job"}</strong>
+                <span>{job.state || "unknown"} · {job.returncode ?? ""}</span>
+                {job.caseDir ? <span>{job.caseDir}</span> : null}
+                <small>{job.id}</small>
+              </button>
+            ))}
+          </div>
+          <div className="job-log-panel">
+            {selectedJob ? (
+              <>
+                <h3>{selectedJob.kind || "job"}</h3>
+                <p className="muted">{selectedJob.id}</p>
+                <h4>stdout</h4>
+                <pre>{stdout || "(empty)"}</pre>
+                <h4>stderr</h4>
+                <pre>{stderr || "(empty)"}</pre>
+              </>
+            ) : (
+              <p className="muted">Select a job to view logs.</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+type PendingImage = {
+  file: File;
+  itemNumber: number;
+  previewUrl: string;
+};
+
+function hasDuplicateNumbers(values: number[]) {
+  return new Set(values).size !== values.length;
+}
+
+function PurchaseImageHelper({ casePath, onBack }: { casePath: string; onBack: () => void }) {
+  const [data, setData] = useState<PurchaseImageHelperData | null>(null);
+  const [pending, setPending] = useState<PendingImage[]>([]);
+  const [existingAssignments, setExistingAssignments] = useState<Record<string, number>>({});
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [messageKind, setMessageKind] = useState<"error" | "success">("error");
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const nextData = await loadPurchaseImageHelper(casePath);
+      setData(nextData);
+      setExistingAssignments(
+        Object.fromEntries(nextData.images.map((image) => [image.path, image.itemNumber || 1])),
+      );
+      setMessage("");
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  }, [casePath]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const itemCount = data?.itemCount || 1;
+  const itemOptions = useMemo(() => Array.from({ length: itemCount }, (_value, index) => index + 1), [itemCount]);
+  const title = data?.images.length ? "Edit Images" : "Upload Images";
+  const existingNumbers = data?.images.map((image) => existingAssignments[image.path] || image.itemNumber || 1) || [];
+  const pendingNumbers = pending.map((item) => item.itemNumber);
+  const hasExistingDuplicates = hasDuplicateNumbers(existingNumbers);
+  const hasPendingDuplicates = hasDuplicateNumbers(pendingNumbers);
+  const assignmentsDirty = Boolean(
+    data?.images.some((image) => (existingAssignments[image.path] || image.itemNumber || 1) !== (image.itemNumber || 1)),
+  );
+
+  const addFiles = useCallback((fileList: FileList | File[]) => {
+    const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || /\.(jpe?g|png|bmp|tiff?)$/i.test(file.name));
+    setPending((current) => [
+      ...current,
+      ...files.map((file, index) => ({
+        file,
+        itemNumber: Math.min(((current.length + index) % itemCount) + 1, itemCount),
+        previewUrl: URL.createObjectURL(file),
+      })),
+    ]);
+  }, [itemCount]);
+
+  const updatePendingItemNumber = (index: number, itemNumber: number) => {
+    setPending((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, itemNumber } : item));
+  };
+
+  const updateExistingItemNumber = (path: string, itemNumber: number) => {
+    setExistingAssignments((current) => ({ ...current, [path]: itemNumber }));
+  };
+
+  const removePending = (index: number) => {
+    setPending((current) => {
+      const item = current[index];
+      if (item) URL.revokeObjectURL(item.previewUrl);
+      return current.filter((_item, itemIndex) => itemIndex !== index);
+    });
+  };
+
+  const deleteExisting = async (path: string) => {
+    setSaving(true);
+    try {
+      await deletePurchaseImage(casePath, path);
+      await refresh();
+      setMessageKind("success");
+      setMessage("Image moved to trash.");
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveOrder = async () => {
+    if (!data || hasExistingDuplicates) return;
+    setSaving(true);
+    try {
+      await reorderPurchaseImages(
+        casePath,
+        data.images.map((image) => ({ path: image.path, itemNumber: existingAssignments[image.path] || image.itemNumber || 1 })),
+      );
+      await refresh();
+      setMessageKind("success");
+      setMessage("Image order saved.");
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveImages = async () => {
+    if (!pending.length || hasPendingDuplicates) return;
+    setSaving(true);
+    try {
+      const result = await uploadPurchaseImages(casePath, pending.map((item) => item.file), pending.map((item) => item.itemNumber));
+      for (const item of pending) URL.revokeObjectURL(item.previewUrl);
+      setPending([]);
+      await refresh();
+      setMessageKind("success");
+      setMessage(result.archived.length ? "Images saved. Replaced images were moved to trash." : "Images saved.");
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="image-helper">
+      {message && <div className={messageKind === "success" ? "success-banner" : "error-banner"}>{message}</div>}
+      <div className="panel image-helper-panel">
+        <div className="panel-header">
+          <div>
+            <h2>{title}</h2>
+            <p className="muted">{data?.caseName || casePath} · items 1-{itemCount}</p>
+          </div>
+          <div className="panel-actions">
+            <button onClick={onBack}>Back</button>
+            <button onClick={() => void refresh()} disabled={loading}>Refresh</button>
+          </div>
+        </div>
+        <div className="image-helper-grid">
+          <div className="quote-preview-panel">
+            {data?.quotePath ? (
+              <iframe className="quote-preview" src={previewUrl(data.quotePath)} title="Quote preview" />
+            ) : (
+              <div className="preview-empty">No quote file found.</div>
+            )}
+          </div>
+          <div className="image-upload-panel">
+            <h3>Current Images</h3>
+            <div className="saved-images">
+              {data?.images.length ? data.images.map((image) => (
+                <div className="saved-image-row editable" key={image.path}>
+                  <img src={previewUrl(image.path)} alt={image.name} />
+                  <div>
+                    <strong>{image.name}</strong>
+                    <select
+                      value={existingAssignments[image.path] || image.itemNumber || 1}
+                      onChange={(event) => updateExistingItemNumber(image.path, Number(event.target.value))}
+                    >
+                      {itemOptions.map((option) => <option value={option} key={option}>Item {option}</option>)}
+                    </select>
+                  </div>
+                  <button disabled={saving} onClick={() => void deleteExisting(image.path)}>Delete</button>
+                </div>
+              )) : <p className="muted">No saved images.</p>}
+            </div>
+            {hasExistingDuplicates ? <p className="form-warning">Each current image must use a different item number.</p> : null}
+            <button className="save-images-button secondary" onClick={() => void saveOrder()} disabled={!assignmentsDirty || hasExistingDuplicates || saving}>
+              Save Order
+            </button>
+
+            <h3>Upload or Replace</h3>
+            <label
+              className="drop-zone"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                addFiles(event.dataTransfer.files);
+              }}
+            >
+              <input
+                type="file"
+                multiple
+                accept="image/*,.jpg,.jpeg,.png,.bmp,.tif,.tiff"
+                onChange={(event) => {
+                  if (event.target.files) addFiles(event.target.files);
+                  event.currentTarget.value = "";
+                }}
+              />
+              <strong>Drop images here</strong>
+              <span>Choosing an occupied item number replaces that image.</span>
+            </label>
+
+            <div className="pending-images">
+              {pending.map((item, index) => (
+                <div className="pending-image-row" key={`${item.file.name}-${index}`}>
+                  <img src={item.previewUrl} alt={item.file.name} />
+                  <div>
+                    <strong>{item.file.name}</strong>
+                    <select value={item.itemNumber} onChange={(event) => updatePendingItemNumber(index, Number(event.target.value))}>
+                      {itemOptions.map((option) => <option value={option} key={option}>Item {option}</option>)}
+                    </select>
+                  </div>
+                  <button onClick={() => removePending(index)}>Remove</button>
+                </div>
+              ))}
+            </div>
+            {hasPendingDuplicates ? <p className="form-warning">Upload one new image per item number.</p> : null}
+
+            <button className="save-images-button" onClick={() => void saveImages()} disabled={!pending.length || hasPendingDuplicates || saving}>
+              Save Images
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [view, setView] = useState<View>("dashboard");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [browserPath, setBrowserPath] = useState("/purchase");
+  const [imageHelperPath, setImageHelperPath] = useState("/purchase");
+  const [actionRunning, setActionRunning] = useState<ActionName | null>(null);
   const [message, setMessage] = useState("");
+  const activeJobKinds = useMemo(
+    () =>
+      new Set(
+        (dashboard?.jobs || [])
+          .filter((job) => job.state === "queued" || job.state === "running")
+          .map((job) => job.kind)
+          .filter(Boolean),
+      ),
+    [dashboard?.jobs],
+  );
+  const activeJobCount = activeJobKinds.size;
 
   const refreshDashboard = useCallback(async () => {
     try {
@@ -204,10 +558,45 @@ function App() {
 
   useEffect(() => { void refreshDashboard(); }, [refreshDashboard]);
 
+  useEffect(() => {
+    if (!activeJobCount) return;
+    const timer = window.setInterval(() => {
+      void refreshDashboard();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [activeJobCount, refreshDashboard]);
+
   const openFiles = (path = "/purchase") => {
     setBrowserPath(path);
     setView("files");
   };
+
+  const openImageHelper = (path: string) => {
+    setImageHelperPath(path);
+    setView("images");
+  };
+
+  const runAction = async (action: ActionName, label: string) => {
+    setActionRunning(action);
+    try {
+      const result = await startAction(action);
+      setMessage(`${label}: started ${result.jobs.length} job${result.jobs.length === 1 ? "" : "s"}.`);
+      await refreshDashboard();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setActionRunning(null);
+    }
+  };
+
+  const renderCurrentView = () => {
+    if (view === "dashboard") return <Dashboard data={dashboard} onOpenFiles={openFiles} onOpenImageHelper={openImageHelper} />;
+    if (view === "files") return <FileBrowser initialPath={browserPath} />;
+    if (view === "images") return <PurchaseImageHelper casePath={imageHelperPath} onBack={() => setView("dashboard")} />;
+    return <JobsView />;
+  };
+
+  const isActionBusy = (action: ActionName) => actionRunning === action || activeJobKinds.has(action);
 
   return (
     <main className="app">
@@ -222,8 +611,15 @@ function App() {
           <button onClick={() => void refreshDashboard()}>Refresh</button>
         </nav>
       </header>
+      <div className="action-bar">
+        <button className={isActionBusy("collect_docs") ? "running" : ""} disabled={isActionBusy("collect_docs")} onClick={() => void runAction("collect_docs", "Collect Docs")}>Collect Docs</button>
+        <button className={isActionBusy("generate_purchase_docs") ? "running" : ""} disabled={isActionBusy("generate_purchase_docs")} onClick={() => void runAction("generate_purchase_docs", "Generate Purchase Docs")}>Generate Purchase Docs</button>
+        <button className={isActionBusy("upload_purchases") ? "running" : ""} disabled={isActionBusy("upload_purchases")} onClick={() => void runAction("upload_purchases", "Upload Purchases")}>Upload Purchases</button>
+        <button className={isActionBusy("process_receipts") ? "running" : ""} disabled={isActionBusy("process_receipts")} onClick={() => void runAction("process_receipts", "Process Receipts")}>Process Receipts</button>
+        <button onClick={() => setView("jobs")}>Jobs</button>
+      </div>
       {message && <div className="error-banner">{message}</div>}
-      {view === "dashboard" ? <Dashboard data={dashboard} onOpenFiles={openFiles} /> : <FileBrowser initialPath={browserPath} />}
+      {renderCurrentView()}
     </main>
   );
 }

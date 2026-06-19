@@ -20,7 +20,7 @@ GUI는 단순 파일 탐색기가 아니라 행정처리 작업대가 되어야 
 ```text
 Dashboard
   - 전체 상태 요약
-  - Missing Documents 기본 표시
+  - `finished`가 아닌 구매 건 기본 표시
   - Show all 버튼으로 전체 구매 건 표시
   - 상단 일괄 실행 버튼
 
@@ -40,7 +40,7 @@ Settings
   - secret/credentials 존재 여부만 표시
 ```
 
-Dashboard와 File Browser는 이미 같은 React 앱에 있어야 한다. 다음에는 Jobs와 Settings를 React 앱 안에 추가한다. 예전 Streamlit 구현은 참고용으로 남길 수 있지만, 주 개발 대상은 React/FastAPI다.
+Dashboard, File Browser, Jobs는 같은 React 앱에 둔다. 다음에는 Settings를 React 앱 안에 추가한다. 예전 Streamlit 구현은 참고용으로 남길 수 있지만, 주 개발 대상은 React/FastAPI다.
 
 ## 상단 일괄 실행 버튼
 
@@ -49,7 +49,7 @@ Dashboard와 File Browser는 이미 같은 React 앱에 있어야 한다. 다음
 권장 버튼:
 
 ```text
-[Collect Documents] [Process Purchases] [Upload Purchases] [Process Receipts] [Jobs]
+[Collect Docs] [Generate Purchase Docs] [Upload Purchases] [Process Receipts] [Jobs]
 ```
 
 한글 UI를 쓴다면:
@@ -60,12 +60,12 @@ Dashboard와 File Browser는 이미 같은 React 앱에 있어야 한다. 다음
 
 각 버튼의 의미:
 
-- `Collect Documents`
+- `Collect Docs`
   - `scripts/documents/run_daily.py` 실행
   - Gmail에서 전자세금계산서/견적서/거래명세서/사업자등록증/통장사본을 수집
   - `purchase/<YYMMDD>_<업체명>/` 폴더와 `purchase/documents.sqlite3` 갱신
 
-- `Process Purchases`
+- `Generate Purchase Docs`
   - 선택된 구매 건 또는 처리 가능한 전체 구매 건에 대해 `process_purchase` 일괄 실행
   - 내부 명령:
     ```bash
@@ -153,34 +153,46 @@ purchase/<case>/.paperworks.yml
 project_id: "202500550001"
 upload_group: ""
 status:
-  documents_collected: true
   purchase_processed: false
-  upload_ready: false
   uploaded: false
 notes: ""
 ```
+
+구매 증빙 상태는 `.paperworks.yml`에 별도로 저장하지 않고 `scripts/documents`의 기준을 따른다. GUI도 같은 이름인 `incomplete`, `ready`, `finished`를 그대로 표시한다.
+
+Dashboard의 구매 건 라벨은 문서 증빙 상태와 작업 상태를 함께 표시한다.
+
+```text
+ready · no images
+ready · images found
+ready · generated
+finished · generated
+finished · uploaded
+```
+
+앞부분은 `scripts/documents` 기준의 문서 상태이고, 뒷부분은 GUI workflow 상태다. `generated`는 `items.xls`와 `물품검수확인서_작성.pdf`가 모두 있는 경우이며, `uploaded`는 `purchase/<case>/.paperworks.yml`의 `workflow.uploaded: true` 또는 `status.uploaded: true`를 기준으로 한다.
 
 GUI 동작:
 
 - Dashboard의 구매 건 목록에 project 선택 드롭다운을 둔다.
 - 기본값은 `projects.yml`에서 선택한 기본 과제 또는 이전에 저장된 `.paperworks.yml` 값이다.
 - 사용자가 구매 건별 project를 변경하면 즉시 `.paperworks.yml`에 저장한다.
-- `Process Purchases`와 `Upload Purchases`는 각 구매 건의 `.paperworks.yml.project_id`를 사용한다.
+- `Generate Purchase Docs`와 `Upload Purchases`는 각 구매 건의 `.paperworks.yml.project_id`를 사용한다.
 - project가 없는 구매 건은 일괄 실행 대상에서 제외하고 “project 필요” 상태로 표시한다.
 
 일괄 처리 대상 계산:
 
 ```text
-Process Purchases:
+Generate Purchase Docs:
   - project_id 있음
-  - 견적서 있음
+  - 구매 건 상태가 `ready` 또는 `finished`
   - 이미지 폴더/imgs 또는 사진 있음
   - 아직 items.xls 또는 물품검수확인서_작성.pdf가 없거나 사용자가 재실행 선택
 
 Upload Purchases:
   - project_id 있음
+  - 구매 건 상태가 `finished`
   - process_purchase 산출물 있음
-  - 필수 첨부 문서 있음
   - preflight 통과
 ```
 
@@ -190,7 +202,7 @@ Upload Purchases:
 
 주요 작업:
 
-- `Collect Documents` 버튼:
+- `Collect Docs` 버튼:
   ```bash
   HOMETAX_PASSWORD=<secret> python3 scripts/documents/run_daily.py
   ```
@@ -332,10 +344,10 @@ Upload Purchases 클릭
 1. 구매 건별 `.paperworks.yml` project mapping
 2. React Dashboard에서 project 선택 UI
 3. React backend action API와 job list/log API
-4. `Process Purchases` 일괄 실행
+4. `Generate Purchase Docs` 일괄 실행
 5. `Upload Purchases` wrapper: preflight 자동 실행 후 fill-save
 6. `Process Receipts` 일괄 실행
-7. `Collect Documents` 실행과 documents DB 상태 표시
+7. `Collect Docs` 실행과 documents DB 상태 표시
 8. 실패 job에 대한 Codex safe analysis
 9. 필요 시 patch 모드
 
