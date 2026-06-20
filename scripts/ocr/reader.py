@@ -150,9 +150,12 @@ def codex_prompt(doc_type: str) -> str:
     prompts = {
         "receipt": (
             "Read this Korean receipt image. Return only compact JSON with exactly these keys: "
-            "store_name string or null, generated string in YYYY-MM-DD HH:MM:SS or YYYY-MM-DD or null, "
-            "total_price integer or null, approval_number string or null, card_number string or null, "
-            "item_names array of strings. Do not include markdown."
+            "store_name string or null, address string or null, generated string in YYYY-MM-DD HH:MM:SS or YYYY-MM-DD or null, "
+            "total_price integer or null, receipt_type string, item_count integer or null, food_count integer or null, "
+            "drink_count integer or null, transport_type string or null, origin string or null, destination string or null, "
+            "approval_number string or null, card_number string or null, item_names array of strings. "
+            "receipt_type must be one of food_drink, transport, lodging, office_supply, medical, fuel, other, unknown. "
+            "For transport receipts, fill origin and destination. Do not include markdown."
         ),
         "bankbook_copy": (
             "Read this Korean bankbook/account-copy image. Return only compact JSON with exactly these keys: "
@@ -162,7 +165,9 @@ def codex_prompt(doc_type: str) -> str:
         "tax_invoice": (
             "Read this Korean electronic tax invoice image. Return only compact JSON with exactly these keys: "
             "vendor string or null, issue_date string in YYYY-MM-DD or null, amount integer or null, "
-            "business_registration_number string or null, approval_number string or null. Do not include markdown."
+            "item_count integer or null, item_prices array of integers, document_number string or null, "
+            "item_code string or null, business_registration_number string or null, approval_number string or null. "
+            "Do not include markdown."
         ),
         "business_registration": (
             "Read this Korean business registration certificate image. Return only compact JSON with exactly these keys: "
@@ -172,12 +177,14 @@ def codex_prompt(doc_type: str) -> str:
         "estimate": (
             "Read this Korean purchase estimate/quote image. Return only compact JSON with exactly these keys: "
             "vendor string or null, issue_date string in YYYY-MM-DD or null, amount integer or null, "
-            "item_count integer or null, items array. Do not include markdown."
+            "item_count integer or null, item_prices array of integers, document_number string or null, "
+            "item_code string or null, items array. Do not include markdown."
         ),
         "statement": (
             "Read this Korean transaction statement image. Return only compact JSON with exactly these keys: "
             "vendor string or null, issue_date string in YYYY-MM-DD or null, amount integer or null, "
-            "item_count integer or null, items array. Do not include markdown."
+            "item_count integer or null, item_prices array of integers, document_number string or null, "
+            "item_code string or null, items array. Do not include markdown."
         ),
     }
     return prompts.get(

@@ -10,6 +10,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 WORKSPACE_DIR = Path(__file__).resolve().parents[2]
 if str(WORKSPACE_DIR) not in sys.path:
@@ -30,9 +31,10 @@ from scripts.documents.db import (
     connect,
     processed_source_has_existing_document,
     processed_source_row,
+    record_processed_document,
     source_key,
-    upsert_document,
 )
+from scripts.documents.ocr_metadata import enrich_metadata_from_pdf
 from scripts.documents.vendors import canonical_vendor, normalize_vendor, safe_name
 
 
@@ -57,6 +59,11 @@ DOCUMENT_QUERIES = [
 
 IMAGE_EXTENSIONS = tax.IMAGE_ATTACHMENT_EXTS
 SUPPORTED_EXTENSIONS = {".pdf", ".xml", ".html", ".htm", *IMAGE_EXTENSIONS}
+
+
+def is_hometax_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return host == "hometax.go.kr" or host.endswith(".hometax.go.kr")
 
 
 def query_set(newer_than: str, include_admin_mail: bool) -> list[str]:
@@ -96,6 +103,7 @@ def build_metadata(
     vendor: str,
     classification,
     pdf_path: Path,
+    content_pdf_path: Path,
     metadata_path: Path,
     pdf_sha: str,
     source_type: str,
@@ -106,7 +114,7 @@ def build_metadata(
     source_sha256: str | None = None,
     source_link: str | None = None,
 ) -> dict:
-    financial_fields = extract_financial_fields_from_pdf(pdf_path)
+    financial_fields = extract_financial_fields_from_pdf(content_pdf_path)
     canonical = canonical_vendor(vendor) or vendor
     return {
         "doc_type": classification.doc_type,
@@ -194,6 +202,7 @@ def metadata_from_pdf(
         vendor=vendor,
         classification=classification,
         pdf_path=pdf_path,
+        content_pdf_path=temp_pdf_path,
         metadata_path=metadata_path,
         pdf_sha=sha256_bytes(temp_pdf_path.read_bytes()),
         source_type=source_type,
@@ -204,6 +213,7 @@ def metadata_from_pdf(
         source_sha256=source_sha256,
         source_link=source_link,
     )
+    metadata = enrich_metadata_from_pdf(metadata, temp_pdf_path)
     return pdf_path, metadata_path, metadata
 
 
@@ -320,12 +330,12 @@ def collect(args: argparse.Namespace) -> int:
                         index=index,
                     )
                     if pdf_path.exists() and metadata_path.exists() and not args.force:
+                        record_processed_document(conn, source_conn, metadata)
                         saved_in_message += 1
                         continue
                     shutil.move(str(temp_pdf_path), str(pdf_path))
                 save_metadata(metadata_path, metadata)
-                if conn:
-                    upsert_document(conn, metadata)
+                record_processed_document(conn, source_conn, metadata)
                 ok_count += 1
                 saved_in_message += 1
                 print(f"ok: {pdf_path}")
@@ -337,6 +347,8 @@ def collect(args: argparse.Namespace) -> int:
         if saved_in_message == 0:
             links = tax.allowed_invoice_links(body_html, body_text)
             for index, url in enumerate(links, start=1):
+                if is_hometax_url(url):
+                    continue
                 classification = classify_document("NTS_eTaxInvoice.html", subject, body_text, from_)
                 source_key_value = source_key(
                     gmail_message_id=message_id,
@@ -382,12 +394,12 @@ def collect(args: argparse.Namespace) -> int:
                             index=index,
                         )
                         if pdf_path.exists() and metadata_path.exists() and not args.force:
+                            record_processed_document(conn, source_conn, metadata)
                             saved_in_message += 1
                             continue
                         shutil.move(str(temp_pdf_path), str(pdf_path))
                     save_metadata(metadata_path, metadata)
-                    if conn:
-                        upsert_document(conn, metadata)
+                    record_processed_document(conn, source_conn, metadata)
                     ok_count += 1
                     saved_in_message += 1
                     print(f"ok: {pdf_path}")

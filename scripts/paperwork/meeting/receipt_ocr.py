@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import json
-import mimetypes
 import os
 import re
-import subprocess
-import tempfile
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
-from uuid import uuid4
+
+from scripts.ocr import OcrConfig, read_document
+from scripts.ocr.validators import ValidationResult as OcrValidationResult
 
 from ..common import document_reader as doc_reader
 from ..common import validators as common_validators
@@ -19,100 +15,10 @@ from .paths import OCR_TEXT_DIR
 from .records import parse_datetime, resolve_receipt_path, safe_int
 
 
-def extract_json_object(raw: str) -> dict[str, object]:
-    return doc_reader.extract_json_object(raw)
-
-
-def encode_multipart_form(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, str]:
-    boundary = f"----receipt-ocr-{uuid4().hex}"
-    chunks: list[bytes] = []
-    for name, value in fields.items():
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-        chunks.append(str(value).encode("utf-8"))
-        chunks.append(b"\r\n")
-    for name, path in files.items():
-        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"; filename="{path.name}"\r\n'.encode("utf-8"))
-        chunks.append(f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"))
-        chunks.append(path.read_bytes())
-        chunks.append(b"\r\n")
-    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
-    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
-
-
-def ocr_api_text_from_response(data: dict[str, object]) -> str:
-    text = str(data.get("text") or "").strip()
-    if text:
-        return text
-    lines: list[tuple[int, int, str, float]] = []
-    for page in data.get("pages") or []:
-        if not isinstance(page, dict):
-            continue
-        for item in page.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            item_text = str(item.get("text") or "").strip()
-            if not item_text:
-                continue
-            box = item.get("box") or []
-            try:
-                y = int(sum(point[1] for point in box) / len(box))
-                x = int(sum(point[0] for point in box) / len(box))
-            except Exception:
-                y = int(page.get("page_index") or 0)
-                x = 0
-            lines.append((y, x, item_text, float(item.get("score") or 0)))
-    lines.sort(key=lambda row: (row[0], row[1]))
-    return "\n".join(f"{text}\t(conf={score:.3f})" for _y, _x, text, score in lines)
-
-
-def open_json_with_retries(make_request, timeout: int, label: str) -> dict[str, object]:
-    retry_codes = {429, 500, 502, 503, 504}
-    last_error = ""
-    for attempt in range(1, 4):
-        try:
-            with urllib.request.urlopen(make_request(), timeout=timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError(f"{label} returned non-object JSON: {data!r}")
-            return data
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[-1200:]
-            last_error = f"HTTP {exc.code}: {body}"
-            if exc.code in retry_codes and attempt < 3:
-                time.sleep(2 * attempt)
-                continue
-            raise RuntimeError(f"{label} failed: {last_error}") from exc
-        except urllib.error.URLError as exc:
-            last_error = str(exc)
-            if attempt < 3:
-                time.sleep(2 * attempt)
-                continue
-            raise RuntimeError(f"{label} failed: {last_error}") from exc
-    raise RuntimeError(f"{label} failed: {last_error}")
-
-
 def run_ocr_api_text(receipt_path: Path, api_url: str, api_key: str, timeout: int) -> str:
     if not api_key:
         raise ValueError("--ocr-api-key, DHLAB_OCR_API_KEY, or DHLAB_LITELLM_API_KEY is required for ocr-api-litellm")
     return doc_reader.ocr_text(receipt_path, api_url, api_key, timeout)
-
-
-def receipt_prompt() -> str:
-    return (
-        "Read this Korean receipt image. Return only compact JSON with exactly these keys: "
-        "total_price integer, generated string in YYYY-MM-DD HH:MM:SS, store_name string, address string, "
-        "receipt_type string, item_count integer or null, food_count integer or null, drink_count integer or null, "
-        "transport_type string, origin string, destination string. "
-        "receipt_type must be one of food_drink, transport, lodging, office_supply, medical, fuel, other, unknown. "
-        "For transport receipts, fill origin and destination. Do not include markdown."
-    )
-
-
-def run_codex_parse(receipt_path: Path, codex_bin: str, model: str | None, timeout: int) -> dict[str, object]:
-    return doc_reader.codex_image_json(receipt_path, receipt_prompt(), codex_bin, model, timeout)
 
 
 def run_litellm_parse(ocr_text: str, base_url: str, api_key: str, model: str, timeout: int) -> dict[str, object]:
@@ -140,6 +46,40 @@ def validate_parsed_receipt(parsed: dict[str, object]) -> None:
     validation = common_validators.validate(parsed, schema)
     if not validation.ok:
         raise ValueError("; ".join(validation.errors))
+
+
+def validate_receipt_for_ocr(doc_type: str, parsed: dict[str, object]) -> OcrValidationResult:
+    try:
+        validate_parsed_receipt(parsed)
+        return OcrValidationResult(True)
+    except Exception as exc:
+        return OcrValidationResult(False, reason=str(exc))
+
+
+def parse_with_central_ocr(
+    receipt_path: Path,
+    *,
+    methods: tuple[str, ...],
+    codex_bin: str,
+    model: str | None,
+    timeout: int,
+) -> tuple[dict[str, object], str]:
+    result = read_document(
+        receipt_path,
+        doc_type="receipt",
+        validator=validate_receipt_for_ocr,
+        config=OcrConfig(methods=methods, codex_bin=codex_bin, codex_model=model, timeout=timeout),
+    )
+    if result.status != "validated":
+        errors = []
+        for attempt in result.attempts:
+            detail = attempt.error or attempt.reason or "not validated"
+            errors.append(f"{attempt.method}: {detail}")
+        raise RuntimeError("Could not parse receipt automatically:\n" + "\n".join(errors))
+    parsed = dict(result.data)
+    if result.raw_text:
+        parsed = fill_ocr_fallbacks(parsed, result.raw_text)
+    return parsed, f"ocr:{result.method}"
 
 
 def datetime_from_ocr_text(ocr_text: str) -> str:
@@ -235,9 +175,14 @@ def parse_receipt(
 ) -> ReceiptRecord:
     receipt_path = resolve_receipt_path(receipt_raw)
     if ocr_engine == "codex":
-        parsed = run_codex_parse(receipt_path, codex_bin, ocr_model, ocr_timeout)
-        validate_parsed_receipt(parsed)
-        return record_from_parsed(receipt_path, parsed, ocr_engine)
+        parsed, engine = parse_with_central_ocr(
+            receipt_path,
+            methods=("codex_image",),
+            codex_bin=codex_bin,
+            model=ocr_model,
+            timeout=ocr_timeout,
+        )
+        return record_from_parsed(receipt_path, parsed, engine)
     if ocr_engine == "ocr-api-litellm":
         api_key = ocr_api_key or litellm_api_key or os.environ.get("DHLAB_OCR_API_KEY", "") or os.environ.get("DHLAB_LITELLM_API_KEY", "")
         text = run_ocr_api_text(receipt_path, ocr_api_url, api_key, ocr_timeout)
@@ -248,32 +193,14 @@ def parse_receipt(
         validate_parsed_receipt(parsed)
         return record_from_parsed(receipt_path, parsed, "ocr-api-litellm", text_path)
     if ocr_engine == "auto":
-        errors: list[str] = []
-        text = ""
-        text_path = ""
-        api_key = ocr_api_key or litellm_api_key or os.environ.get("DHLAB_OCR_API_KEY", "") or os.environ.get("DHLAB_LITELLM_API_KEY", "")
-        if api_key:
-            try:
-                text = run_ocr_api_text(receipt_path, ocr_api_url, api_key, ocr_timeout)
-                text_path = save_ocr_text(receipt_path, text)
-                parse_key = litellm_api_key or ocr_api_key or os.environ.get("DHLAB_LITELLM_API_KEY", "") or os.environ.get("DHLAB_OCR_API_KEY", "")
-                parsed = run_litellm_parse(text, litellm_base_url, parse_key, litellm_model, ocr_timeout)
-                parsed = fill_ocr_fallbacks(parsed, text)
-                validate_parsed_receipt(parsed)
-                return record_from_parsed(receipt_path, parsed, "auto:ocr-api-litellm", text_path)
-            except Exception as exc:
-                errors.append(f"ocr-api-litellm: {exc}")
-        else:
-            errors.append("ocr-api-litellm: missing OCR/LiteLLM API key")
-        try:
-            parsed = run_codex_parse(receipt_path, codex_bin, ocr_model, ocr_timeout)
-            if text:
-                parsed = fill_ocr_fallbacks(parsed, text)
-            validate_parsed_receipt(parsed)
-            return record_from_parsed(receipt_path, parsed, "auto:codex", text_path)
-        except Exception as exc:
-            errors.append(f"codex: {exc}")
-        raise RuntimeError("Could not parse receipt automatically:\n" + "\n".join(errors))
+        parsed, engine = parse_with_central_ocr(
+            receipt_path,
+            methods=("text", "codex_image"),
+            codex_bin=codex_bin,
+            model=ocr_model,
+            timeout=ocr_timeout,
+        )
+        return record_from_parsed(receipt_path, parsed, engine)
     raise ValueError(f"unsupported OCR engine: {ocr_engine}")
 
 

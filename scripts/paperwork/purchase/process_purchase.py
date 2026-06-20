@@ -5,19 +5,12 @@ import argparse
 import json
 import logging
 import math
-import mimetypes
 import os
 import re
-import subprocess
-import tempfile
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
-from uuid import uuid4
 
 import xlwt
 import yaml
@@ -95,111 +88,6 @@ def int_price(value: str) -> int:
     return int(value.replace(",", "").strip())
 
 
-def quote_text(quote_pdf: Path) -> str:
-    return subprocess.check_output(["pdftotext", "-layout", str(quote_pdf), "-"], text=True)
-
-
-def extract_json_object(raw: str) -> dict[str, object]:
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if not match:
-            raise ValueError(f"model did not return JSON: {raw!r}") from None
-        parsed = json.loads(match.group(0))
-    if not isinstance(parsed, dict):
-        raise ValueError(f"model returned non-object JSON: {parsed!r}")
-    return parsed
-
-
-def encode_multipart_form(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, str]:
-    boundary = f"----purchase-ocr-{uuid4().hex}"
-    chunks: list[bytes] = []
-    for name, value in fields.items():
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-        chunks.append(str(value).encode("utf-8"))
-        chunks.append(b"\r\n")
-    for name, path in files.items():
-        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"; filename="{path.name}"\r\n'.encode("utf-8"))
-        chunks.append(f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"))
-        chunks.append(path.read_bytes())
-        chunks.append(b"\r\n")
-    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
-    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
-
-
-def open_json_with_retries(make_request, timeout: int, label: str) -> dict[str, object]:
-    retry_codes = {429, 500, 502, 503, 504}
-    last_error = ""
-    for attempt in range(1, 4):
-        try:
-            with urllib.request.urlopen(make_request(), timeout=timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError(f"{label} returned non-object JSON: {data!r}")
-            return data
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[-1200:]
-            last_error = f"HTTP {exc.code}: {body}"
-            if exc.code in retry_codes and attempt < 3:
-                time.sleep(2 * attempt)
-                continue
-            raise RuntimeError(f"{label} failed: {last_error}") from exc
-        except urllib.error.URLError as exc:
-            last_error = str(exc)
-            if attempt < 3:
-                time.sleep(2 * attempt)
-                continue
-            raise RuntimeError(f"{label} failed: {last_error}") from exc
-    raise RuntimeError(f"{label} failed: {last_error}")
-
-
-def ocr_api_text_from_response(data: dict[str, object]) -> str:
-    text = str(data.get("text") or "").strip()
-    if text:
-        return text
-    lines: list[tuple[int, int, str]] = []
-    for page in data.get("pages") or []:
-        if not isinstance(page, dict):
-            continue
-        for item in page.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            item_text = str(item.get("text") or "").strip()
-            if not item_text:
-                continue
-            box = item.get("box") or []
-            try:
-                y = int(sum(point[1] for point in box) / len(box))
-                x = int(sum(point[0] for point in box) / len(box))
-            except Exception:
-                y = int(page.get("page_index") or 0)
-                x = 0
-            lines.append((y, x, item_text))
-    lines.sort(key=lambda row: (row[0], row[1]))
-    return "\n".join(text for _y, _x, text in lines)
-
-
-def run_ocr_api_text(quote_pdf: Path, api_url: str, api_key: str, timeout: int) -> str:
-    if not api_key:
-        raise ValueError("--ocr-api-key, DHLAB_OCR_API_KEY, or DHLAB_LITELLM_API_KEY is required for ocr-litellm")
-    body, content_type = encode_multipart_form({"return_format": "json"}, {"file": quote_pdf})
-    data = open_json_with_retries(
-        lambda: urllib.request.Request(
-            api_url,
-            data=body,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": content_type},
-            method="POST",
-        ),
-        timeout,
-        "OCR API",
-    )
-    return ocr_api_text_from_response(data)
-
-
 def quote_llm_prompt() -> str:
     return (
         "Extract purchase quote table data from Korean quote text. Return only compact JSON with this schema: "
@@ -210,58 +98,6 @@ def quote_llm_prompt() -> str:
         "Do not normalize VAT yourself; preserve printed raw table values. Use integers without commas. "
         "If a value is absent, use null. Do not include markdown."
     )
-
-
-def run_litellm_quote_parse(text: str, base_url: str, api_key: str, model: str, timeout: int) -> dict[str, object]:
-    if not api_key:
-        raise ValueError("--litellm-api-key or DHLAB_LITELLM_API_KEY is required for litellm parsing")
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": quote_llm_prompt()}, {"role": "user", "content": text[:18000]}],
-        "temperature": 0,
-        "max_tokens": 1800,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-    }
-    data = open_json_with_retries(
-        lambda: urllib.request.Request(
-            base_url.rstrip("/") + "/chat/completions",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        ),
-        timeout,
-        "LiteLLM",
-    )
-    message = data["choices"][0]["message"]
-    return extract_json_object(message.get("content") or message.get("reasoning_content") or "")
-
-
-def run_codex_quote_parse(quote_pdf: Path, codex_bin: str, model: str | None, timeout: int) -> dict[str, object]:
-    prompt = quote_llm_prompt() + f"\nRead this quote PDF path and extract the data: {quote_pdf}"
-    with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as handle:
-        output_path = Path(handle.name)
-    command = [
-        codex_bin,
-        "exec",
-        "--skip-git-repo-check",
-        "--ephemeral",
-        "-s",
-        "read-only",
-        "--color",
-        "never",
-        "-o",
-        str(output_path),
-    ]
-    if model:
-        command.extend(["--model", model])
-    command.append(prompt)
-    try:
-        completed = subprocess.run(command, input="", text=True, capture_output=True, timeout=timeout, check=False)
-        if completed.returncode != 0:
-            raise RuntimeError(f"Codex quote parse failed with exit code {completed.returncode}\nSTDERR:\n{completed.stderr[-4000:]}")
-        return extract_json_object(output_path.read_text(encoding="utf-8").strip())
-    finally:
-        output_path.unlink(missing_ok=True)
-
 
 def parse_quote_totals(text: str) -> QuoteTotals:
     totals = QuoteTotals()
@@ -483,20 +319,17 @@ def parse_quote_items(
                 raise
             errors.append(f"pdf-text: {exc}")
 
-    if parse_engine in {"auto", "ocr-litellm"}:
-        if parse_engine == "ocr-litellm" or litellm_api_key or ocr_api_key:
-            try:
-                text = doc_reader.ocr_text(quote_pdf, ocr_api_url, ocr_api_key or litellm_api_key, timeout)
-                parsed = doc_reader.litellm_json(text, quote_llm_prompt(), litellm_base_url, litellm_api_key or ocr_api_key, litellm_model, timeout, max_tokens=1800)
-                validation = common_validators.validate(parsed, schema)
-                if not validation.ok:
-                    raise ValueError("ocr-litellm integrity check failed: " + "; ".join(validation.errors))
-                items, mode, totals = parse_quote_items_from_json(parsed)
-                return items, f"ocr_litellm_{mode}", totals
-            except Exception as exc:
-                if parse_engine == "ocr-litellm":
-                    raise
-                errors.append(f"ocr-litellm: {exc}")
+    if parse_engine == "ocr-litellm":
+        try:
+            text = doc_reader.ocr_text(quote_pdf, ocr_api_url, ocr_api_key or litellm_api_key, timeout)
+            parsed = doc_reader.litellm_json(text, quote_llm_prompt(), litellm_base_url, litellm_api_key or ocr_api_key, litellm_model, timeout, max_tokens=1800)
+            validation = common_validators.validate(parsed, schema)
+            if not validation.ok:
+                raise ValueError("ocr-litellm integrity check failed: " + "; ".join(validation.errors))
+            items, mode, totals = parse_quote_items_from_json(parsed)
+            return items, f"ocr_litellm_{mode}", totals
+        except Exception:
+            raise
 
     if parse_engine in {"auto", "codex"}:
         try:

@@ -25,8 +25,10 @@ from scripts.documents.db import (
     upsert_processed_source,
     upsert_purchase_case,
 )
+from scripts.documents.ocr_metadata import enrich_metadata_from_pdf, structured_payload
 from scripts.documents.purchase_scan import scan_purchase_root
 from scripts.documents.vendors import canonical_vendor, normalize_vendor, parse_case_name, safe_name
+from scripts.ocr.validation_profiles import validate_document
 
 
 DEFAULT_DB = WORKSPACE_DIR / "purchase" / "documents.sqlite3"
@@ -341,7 +343,10 @@ def copy_vendor_docs_to_purchase(
             target = case.path / COPY_NAMES[doc_type]
             if target.exists():
                 continue
-            install_document(doc, target, move_source=False, db_path=None)
+            metadata = validated_vendor_doc_metadata(doc_path(doc), doc_type, case.vendor, base_metadata=doc)
+            if not metadata:
+                continue
+            install_document(metadata, target, move_source=False, db_path=None)
             copied.append(target)
     return copied
 
@@ -441,6 +446,40 @@ def vendor_metadata(source: Path, doc_type: str, vendor: str) -> dict:
     }
 
 
+def validated_vendor_doc_metadata(
+    source: Path,
+    doc_type: str,
+    vendor: str | None,
+    *,
+    base_metadata: dict | None = None,
+) -> dict | None:
+    if doc_type not in VENDOR_DOC_TYPES or not source.exists():
+        return None
+    metadata = load_metadata(source.with_suffix(".json"), base_metadata or vendor_metadata(source, doc_type, vendor or "미상"))
+    metadata.update(base_metadata or {})
+    metadata["doc_type"] = doc_type
+    metadata["all_doc_types"] = [doc_type]
+    metadata.setdefault("vendor", vendor)
+    enriched = enrich_metadata_from_pdf(metadata, source)
+    expected_vendor = canonical_vendor(vendor or enriched.get("vendor")) or vendor
+    validation = validate_document(doc_type, structured_payload(enriched), expected_vendor=expected_vendor)
+    if not validation.ok:
+        print(
+            f"skip-vendor-doc: {source} doc_type={doc_type} "
+            f"missing={','.join(validation.missing_fields) or '-'} "
+            f"invalid={','.join(validation.invalid_fields) or '-'}"
+        )
+        return None
+    enriched["ocr_validation"] = {
+        "ok": validation.ok,
+        "missing_fields": list(validation.missing_fields),
+        "invalid_fields": list(validation.invalid_fields),
+        "reason": validation.reason,
+    }
+    enriched.setdefault("ocr_status", "validated_cached")
+    return enriched
+
+
 def refresh_vendor_store_from_purchase(
     *,
     purchase_root: Path,
@@ -454,22 +493,18 @@ def refresh_vendor_store_from_purchase(
         for doc_type in VENDOR_DOC_TYPES:
             for source in case.local_docs.get(doc_type, []):
                 target = vendor_dir(vendor_root, case.vendor) / COPY_NAMES[doc_type]
-                if target.exists() and file_sha256(target) == file_sha256(source):
-                    metadata = ensure_document_metadata(
-                        vendor_metadata(target, doc_type, case.vendor),
-                        target,
-                        db_path=db_path,
-                    )
-                    installed.append(metadata)
+                if target.exists():
                     continue
-                if not target.exists():
-                    metadata = install_document(
-                        vendor_metadata(source, doc_type, case.vendor),
-                        target,
-                        move_source=False,
-                        db_path=db_path,
-                    )
-                    installed.append(metadata)
+                metadata = validated_vendor_doc_metadata(source, doc_type, case.vendor)
+                if not metadata:
+                    continue
+                metadata = install_document(
+                    metadata,
+                    target,
+                    move_source=False,
+                    db_path=db_path,
+                )
+                installed.append(metadata)
     return installed
 
 
@@ -486,9 +521,11 @@ def install_collected_vendor_docs(
             continue
         target = vendor_dir(vendor_root, doc.get("vendor")) / COPY_NAMES[doc_type]
         if target.exists():
-            installed.append(ensure_document_metadata(doc, target, db_path=db_path))
             continue
-        installed.append(install_document(doc, target, move_source=True, db_path=db_path))
+        metadata = validated_vendor_doc_metadata(doc_path(doc), doc_type, doc.get("vendor"), base_metadata=doc)
+        if not metadata:
+            continue
+        installed.append(install_document(metadata, target, move_source=True, db_path=db_path))
     return installed
 
 

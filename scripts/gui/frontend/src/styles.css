@@ -334,6 +334,24 @@ body {
   grid-template-columns: 1fr auto;
 }
 
+.job-row.failed {
+  margin: 4px 0;
+  padding: 8px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+}
+
+.job-row.failed strong,
+.job-card.failed strong {
+  color: #991b1b;
+}
+
+.job-error {
+  color: #b91c1c !important;
+  overflow-wrap: anywhere;
+}
+
 .job-row small {
   grid-column: 1 / -1;
   overflow-wrap: anywhere;
@@ -365,6 +383,15 @@ body {
 
 .job-card:hover {
   background: #f8fafc;
+}
+
+.job-card.failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.job-card.failed:hover {
+  background: #fee2e2;
 }
 
 .job-card strong,

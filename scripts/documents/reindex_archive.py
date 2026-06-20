@@ -18,6 +18,7 @@ from scripts.documents.classifiers import (
     extract_vendor_from_document_text,
 )
 from scripts.documents.db import connect, upsert_document
+from scripts.documents.ocr_metadata import enrich_metadata_from_pdf
 from scripts.documents.vendors import normalize_vendor
 
 
@@ -25,7 +26,13 @@ DEFAULT_ARCHIVE = WORKSPACE_DIR / "purchase" / ".incoming"
 DEFAULT_DB = WORKSPACE_DIR / "purchase" / "documents.sqlite3"
 
 
-def reindex_archive(archive: Path, db_path: Path | None) -> tuple[int, int]:
+def reindex_archive(
+    archive: Path,
+    db_path: Path | None,
+    *,
+    allow_codex: bool = False,
+    force_codex: bool = False,
+) -> tuple[int, int]:
     conn = connect(db_path) if db_path else None
     updated = 0
     skipped = 0
@@ -66,6 +73,14 @@ def reindex_archive(archive: Path, db_path: Path | None) -> tuple[int, int]:
         metadata["item_prices"] = list(fields.item_prices)
         metadata["json_path"] = str(json_path)
         metadata["saved_pdf"] = str(pdf_path)
+        metadata = enrich_metadata_from_pdf(
+            metadata,
+            pdf_path,
+            allow_codex=allow_codex or force_codex,
+            force_codex=force_codex,
+        )
+        metadata["json_path"] = str(json_path)
+        metadata["saved_pdf"] = str(pdf_path)
         json_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         if conn:
             if previous_doc_type and previous_doc_type != classification.doc_type and metadata.get("sha256"):
@@ -86,12 +101,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--no-db", action="store_true")
+    parser.add_argument("--allow-codex", action="store_true", help="Allow Codex fallback for archive documents.")
+    parser.add_argument("--force-codex", action="store_true", help="Allow Codex fallback again even if it was tried before.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    updated, skipped = reindex_archive(args.archive, None if args.no_db else args.db)
+    updated, skipped = reindex_archive(
+        args.archive,
+        None if args.no_db else args.db,
+        allow_codex=args.allow_codex,
+        force_codex=args.force_codex,
+    )
     print(f"updated={updated} skipped={skipped}")
     return 0
 

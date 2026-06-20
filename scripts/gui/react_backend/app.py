@@ -199,6 +199,18 @@ def action_job_response(jobs: list[job_services.Job]) -> dict[str, object]:
     }
 
 
+def job_error_summary(job: job_services.Job) -> str:
+    if job.status.get("state") != "failed":
+        return ""
+    stderr = job_services.read_log(job, "stderr.log", max_chars=4000)
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if lines:
+        return lines[-1][-500:]
+    stdout = job_services.read_log(job, "stdout.log", max_chars=4000)
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    return lines[-1][-500:] if lines else "Job failed. Open Jobs for logs."
+
+
 def purchase_image_paths(case_dir: Path) -> list[Path]:
     candidates = [case_dir / "imgs", case_dir / "imgs1", case_dir / "img", case_dir]
     image_paths: list[Path] = []
@@ -507,6 +519,7 @@ def dashboard() -> dict[str, object]:
                 "returncode": job.status.get("returncode"),
                 "createdAt": job.status.get("created_at"),
                 "finishedAt": job.status.get("finished_at"),
+                "errorSummary": job_error_summary(job),
             }
         )
 
@@ -538,6 +551,7 @@ def list_jobs() -> dict[str, object]:
                 "finishedAt": job.status.get("finished_at"),
                 "caseDir": job.status.get("case_dir"),
                 "count": job.status.get("count"),
+                "errorSummary": job_error_summary(job),
             }
         )
     return {"jobs": jobs}

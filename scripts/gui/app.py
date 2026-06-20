@@ -17,7 +17,7 @@ from scripts.gui.services.paths import MEETING_DIR, PROJECTS_YML, PURCHASE_DIR, 
 
 
 DOC_TYPES = ["기타", "견적서", "거래명세서", "전자세금계산서", "통장사본", "사업자등록증", "물품검수확인서", "물품사진"]
-PARSE_ENGINES = ["auto", "pdf-text", "ocr-litellm", "codex"]
+PARSE_ENGINES = ["auto", "pdf-text", "codex"]
 
 
 def init_page() -> None:

@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -69,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def collect_to_temp(args: argparse.Namespace, output_dir: Path) -> int:
+def collect_to_incoming(args: argparse.Namespace, output_dir: Path) -> int:
     collect_args = SimpleNamespace(
         credentials=args.credentials,
         token=args.token,
@@ -127,51 +126,51 @@ def main() -> int:
             db_path=db_path,
         )
 
-    with tempfile.TemporaryDirectory(prefix="documents-incoming-") as temp_dir_name:
-        temp_dir = Path(temp_dir_name)
-        collect_status = collect_to_temp(args, temp_dir)
-        if args.dry_run:
-            return collect_status
-
-        collected_docs = load_json_archive([temp_dir])
-        install_collected_vendor_docs(
-            collected_docs,
-            vendor_root=args.vendor_root,
-            db_path=db_path,
-        )
-        copy_vendor_docs_to_purchase(purchase_root=args.purchase_root, vendor_root=args.vendor_root)
-        candidate_docs = load_candidate_docs(args.db, temp_dir)
-        case_docs = [
-            doc
-            for doc in candidate_docs
-            if doc.get("doc_type") not in {"business_registration", "bankbook_copy"}
-        ]
-        card_placed = fill_existing_card_payment_cases(
-            docs=case_docs,
-            purchase_root=args.purchase_root,
-            db_path=db_path,
-            min_score=args.card_min_score,
-        )
-        for path in card_placed:
-            print(f"card-placed: {path}")
-        candidate_docs = case_docs + load_vendor_docs(args.vendor_root)
-
-        plans = build_plans(
-            docs=candidate_docs,
-            purchase_root=args.purchase_root,
-            min_score=args.min_score,
-            include_vendor_docs=True,
-        )
-        print_plans(plans)
-        if db_path:
-            sync_db_status(plans, db_path)
-        for plan in plans:
-            target = apply_plan(plan, db_path, move_sources=True)
-            print(f"placed: {target}")
-            if not args.no_labels:
-                mark_finished_case_messages(args, target)
-
+    incoming_dir = args.purchase_root / ".incoming"
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+    collect_status = collect_to_incoming(args, incoming_dir)
+    if args.dry_run:
         return collect_status
+
+    collected_docs = load_json_archive([incoming_dir])
+    install_collected_vendor_docs(
+        collected_docs,
+        vendor_root=args.vendor_root,
+        db_path=db_path,
+    )
+    copy_vendor_docs_to_purchase(purchase_root=args.purchase_root, vendor_root=args.vendor_root)
+    candidate_docs = load_candidate_docs(args.db, incoming_dir)
+    case_docs = [
+        doc
+        for doc in candidate_docs
+        if doc.get("doc_type") not in {"business_registration", "bankbook_copy"}
+    ]
+    card_placed = fill_existing_card_payment_cases(
+        docs=case_docs,
+        purchase_root=args.purchase_root,
+        db_path=db_path,
+        min_score=args.card_min_score,
+    )
+    for path in card_placed:
+        print(f"card-placed: {path}")
+    candidate_docs = case_docs + load_vendor_docs(args.vendor_root)
+
+    plans = build_plans(
+        docs=candidate_docs,
+        purchase_root=args.purchase_root,
+        min_score=args.min_score,
+        include_vendor_docs=True,
+    )
+    print_plans(plans)
+    if db_path:
+        sync_db_status(plans, db_path)
+    for plan in plans:
+        target = apply_plan(plan, db_path, move_sources=True)
+        print(f"placed: {target}")
+        if not args.no_labels:
+            mark_finished_case_messages(args, target)
+
+    return collect_status
 
 
 if __name__ == "__main__":

@@ -84,7 +84,7 @@ export type DashboardData = {
     updatedAt: string;
   }>;
   meeting: { receiptCount: number; outputCount: number; recordsCsv: boolean; summaryCsv: boolean };
-  jobs: Array<{ id: string; kind?: string; state?: string; returncode?: number | null; createdAt?: string; finishedAt?: string }>;
+  jobs: Array<{ id: string; kind?: string; state?: string; returncode?: number | null; createdAt?: string; finishedAt?: string; errorSummary?: string }>;
 };
 
 export async function loadDashboard(): Promise<DashboardData> {
@@ -103,6 +103,7 @@ export type JobSummary = {
   finishedAt?: string;
   caseDir?: string;
   count?: number;
+  errorSummary?: string;
 };
 
 export type ActionResult = {

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from scripts.ocr.extractors import extract_text
 
 
 MONEY_RE = re.compile(r"(?:₩\s*)?([0-9]{1,3}(?:,[0-9]{3})+)")
@@ -40,26 +41,7 @@ def money_values(text: str) -> list[int]:
 
 
 def extract_pdf_text(pdf_path: Path) -> str:
-    try:
-        completed = subprocess.run(
-            ["pdftotext", "-layout", str(pdf_path), "-"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if completed.stdout.strip():
-            return completed.stdout
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        pass
-
-    try:
-        from pypdf import PdfReader
-
-        reader = PdfReader(str(pdf_path))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception:
-        return ""
+    return extract_text(pdf_path)
 
 
 def extract_total_amount(text: str) -> int | None:
@@ -101,8 +83,12 @@ def extract_item_prices(text: str) -> tuple[int, ...]:
         values = money_values(line)
         if len(values) >= 3:
             supply_amount = values[-2]
-            if supply_amount not in prices:
-                prices.append(supply_amount)
+        elif re.match(r"^\d+\s+", line) and len(values) >= 2:
+            supply_amount = values[-1]
+        else:
+            continue
+        if supply_amount not in prices:
+            prices.append(supply_amount)
     return tuple(prices)
 
 

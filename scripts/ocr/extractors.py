@@ -190,6 +190,48 @@ def codex_image_json(
             output_path.unlink(missing_ok=True)
 
 
+def codex_json(
+    path: Path,
+    prompt: str,
+    *,
+    codex_bin: str = "codex",
+    model: str | None = None,
+    timeout: int = 180,
+) -> dict[str, object]:
+    text = extract_text(path).strip()
+    if not text and path.suffix.lower() in IMAGE_SUFFIXES | {".pdf"}:
+        return codex_image_json(path, prompt, codex_bin=codex_bin, model=model, timeout=timeout)
+    if text:
+        full_prompt = f"{prompt}\nDocument path: {path}\nDocument text:\n{text[:20000]}"
+    else:
+        full_prompt = f"{prompt}\nRead this document and return JSON only: {path}"
+
+    with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as handle:
+        output_path = Path(handle.name)
+    command = [
+        codex_bin,
+        "exec",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "-s",
+        "read-only",
+        "--color",
+        "never",
+        "-o",
+        str(output_path),
+    ]
+    if model:
+        command.extend(["--model", model])
+    command.append(full_prompt)
+    try:
+        completed = subprocess.run(command, input="", text=True, capture_output=True, timeout=timeout, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(f"Codex failed with exit code {completed.returncode}\nSTDERR:\n{completed.stderr[-4000:]}")
+        return extract_json_object(output_path.read_text(encoding="utf-8").strip())
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
 def render_pdf_first_page(path: Path, tmp_dir: Path) -> Path:
     out_prefix = tmp_dir / "page"
     completed = subprocess.run(

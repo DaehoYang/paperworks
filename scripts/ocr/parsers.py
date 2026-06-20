@@ -43,10 +43,19 @@ def parse_generic(text: str) -> dict[str, object]:
 
 def parse_receipt(text: str) -> dict[str, object]:
     lines = nonempty_lines(text)
+    receipt_type = infer_receipt_type(text)
     return {
         "store_name": infer_receipt_store(lines),
+        "address": infer_address(lines),
         "generated": first_datetime(text),
         "total_price": receipt_total_price(text),
+        "receipt_type": receipt_type,
+        "item_count": None,
+        "food_count": None,
+        "drink_count": None,
+        "transport_type": "taxi" if receipt_type == "transport" and "택시" in text else None,
+        "origin": None,
+        "destination": None,
         "approval_number": first_group(APPROVAL_RE, text),
         "card_number": first_group(CARD_RE, text),
         "item_names": infer_receipt_items(lines),
@@ -64,10 +73,15 @@ def parse_bankbook(text: str) -> dict[str, object]:
 
 
 def parse_tax_invoice(text: str) -> dict[str, object]:
+    document_number, item_code = infer_document_codes(text)
     return {
         "vendor": infer_vendor(text),
         "issue_date": first_date(text),
         "amount": tax_invoice_amount(text),
+        "item_prices": item_prices(text),
+        "item_count": infer_item_count(text),
+        "document_number": document_number,
+        "item_code": item_code,
         "business_registration_number": business_number(text),
         "approval_number": infer_tax_approval(text),
     }
@@ -82,11 +96,16 @@ def parse_business_registration(text: str) -> dict[str, object]:
 
 
 def parse_purchase_document(text: str) -> dict[str, object]:
+    document_number, item_code = infer_document_codes(text)
+    prices = item_prices(text)
     return {
         "vendor": infer_vendor(text),
         "issue_date": first_date(text),
         "amount": max_money(text),
-        "item_count": infer_item_count(text),
+        "item_count": len(prices) or infer_item_count(text),
+        "item_prices": prices,
+        "document_number": document_number,
+        "item_code": item_code,
     }
 
 
@@ -140,6 +159,29 @@ def money_values(text: str) -> list[int]:
 def max_money(text: str) -> int | None:
     values = money_values(text)
     return max(values) if values else None
+
+
+def item_prices(text: str) -> list[int]:
+    prices: list[int] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or looks_like_summary_line(line):
+            continue
+        values = comma_money_values(line)
+        if len(values) >= 3:
+            candidate = values[-2]
+        elif re.match(r"^\d+\s+", line) and len(values) >= 2:
+            candidate = values[-1]
+        else:
+            continue
+        if 1_000 <= candidate <= 100_000_000 and candidate not in prices:
+            prices.append(candidate)
+    return prices
+
+
+def looks_like_summary_line(line: str) -> bool:
+    compact = re.sub(r"\s+", "", line)
+    return any(token in compact for token in ("공급가액", "부가세", "부가세액", "세액", "합계금액", "합계", "총계"))
 
 
 def receipt_total_price(text: str) -> int | None:
@@ -196,6 +238,23 @@ def business_number(text: str) -> str | None:
     return "-".join(match.groups())
 
 
+def infer_document_codes(text: str) -> tuple[str | None, str | None]:
+    patterns = [
+        r"\b\d{2}-[A-Z0-9]{3,}[A-Z0-9,-]*\b",
+        r"\b[A-Z]{2,}\d{2,}[A-Z0-9-]*\b",
+        r"\b\d{2,4}-\d{2,5}\b",
+    ]
+    candidates: list[str] = []
+    upper = text.upper()
+    for pattern in patterns:
+        for match in re.findall(pattern, upper):
+            if match not in candidates:
+                candidates.append(match)
+    document_number = candidates[0] if candidates else None
+    item_code = next((value for value in candidates if re.search(r"[A-Z]", value)), document_number)
+    return document_number, item_code
+
+
 def nonempty_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
@@ -217,6 +276,30 @@ def infer_receipt_store(lines: list[str]) -> str | None:
         else:
             fallback.append(compact)
     return preferred[0] if preferred else (fallback[0] if fallback else None)
+
+
+def infer_address(lines: list[str]) -> str | None:
+    for line in lines:
+        if re.search(r"(서울|경기|인천|대전|대구|부산|광주|울산|세종|강원|충북|충남|전북|전남|경북|경남|제주).*(로|길|동|구|시)", line):
+            return line.strip()
+    return None
+
+
+def infer_receipt_type(text: str) -> str:
+    lowered = text.lower()
+    if any(token in lowered for token in ("택시", "카카오t", "kakao t", "ktx", "srt", "코레일", "철도", "버스", "주차")):
+        return "transport"
+    if any(token in text for token in ("카페", "커피", "식당", "국밥", "비빔밥", "스타벅스", "투썸", "이디야", "베이커리", "음식", "주점")):
+        return "food_drink"
+    if any(token in text for token in ("호텔", "모텔", "숙박")):
+        return "lodging"
+    if any(token in text for token in ("문구", "오피스", "사무용품")):
+        return "office_supply"
+    if any(token in text for token in ("병원", "약국", "의원")):
+        return "medical"
+    if any(token in text for token in ("주유", "충전소")):
+        return "fuel"
+    return "unknown"
 
 
 def infer_receipt_items(lines: list[str]) -> list[str]:

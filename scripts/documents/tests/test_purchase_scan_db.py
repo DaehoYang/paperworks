@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from pypdf import PdfWriter
 
 from scripts.documents.backfill_processed_sources import backfill_from_json
@@ -14,6 +15,7 @@ from scripts.documents.db import (
     load_documents,
     processed_source_has_existing_document,
     processed_source_row,
+    record_processed_document,
     replace_local_purchase_documents,
     source_key,
     upsert_document,
@@ -28,6 +30,7 @@ from scripts.documents.place_purchase_docs import (
     copy_vendor_docs_to_purchase,
     fill_existing_card_payment_cases,
     refresh_vendor_store_from_purchase,
+    vendor_metadata,
 )
 from scripts.documents.purchase_scan import scan_purchase_root
 
@@ -119,11 +122,15 @@ class PurchaseScanDbTests(unittest.TestCase):
             (case / "통장사본.pdf").write_bytes(b"bank")
 
             vendor_root = root / "vendors"
-            docs = refresh_vendor_store_from_purchase(
-                purchase_root=root,
-                vendor_root=vendor_root,
-                db_path=Path(td) / "documents.sqlite3",
-            )
+            with patch("scripts.documents.place_purchase_docs.validated_vendor_doc_metadata") as validated:
+                validated.side_effect = lambda source, doc_type, vendor, base_metadata=None: vendor_metadata(
+                    source, doc_type, vendor
+                )
+                docs = refresh_vendor_store_from_purchase(
+                    purchase_root=root,
+                    vendor_root=vendor_root,
+                    db_path=Path(td) / "documents.sqlite3",
+                )
 
             self.assertEqual({doc["doc_type"] for doc in docs}, {"business_registration", "bankbook_copy"})
             self.assertTrue((vendor_root / "에이이노텍" / "사업자등록증.pdf").exists())
@@ -154,11 +161,15 @@ class PurchaseScanDbTests(unittest.TestCase):
             )
 
             vendor_root = root / "vendors"
-            refresh_vendor_store_from_purchase(
-                purchase_root=root,
-                vendor_root=vendor_root,
-                db_path=Path(td) / "documents.sqlite3",
-            )
+            with patch("scripts.documents.place_purchase_docs.validated_vendor_doc_metadata") as validated:
+                validated.side_effect = lambda source, doc_type, vendor, base_metadata=None: vendor_metadata(
+                    source, doc_type, vendor
+                )
+                refresh_vendor_store_from_purchase(
+                    purchase_root=root,
+                    vendor_root=vendor_root,
+                    db_path=Path(td) / "documents.sqlite3",
+                )
 
             biz = json.loads((vendor_root / "성경포토닉스" / "사업자등록증.json").read_text(encoding="utf-8"))
             bank = json.loads((vendor_root / "성경포토닉스" / "통장사본.json").read_text(encoding="utf-8"))
@@ -199,7 +210,9 @@ class PurchaseScanDbTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-            copied = copy_vendor_docs_to_purchase(purchase_root=root, vendor_root=root / "vendors")
+            with patch("scripts.documents.place_purchase_docs.validated_vendor_doc_metadata") as validated:
+                validated.side_effect = lambda source, doc_type, vendor, base_metadata=None: dict(base_metadata or {})
+                copied = copy_vendor_docs_to_purchase(purchase_root=root, vendor_root=root / "vendors")
 
             self.assertEqual(copied, [case / "사업자등록증.pdf"])
             self.assertTrue((case / "사업자등록증.pdf").exists())
@@ -535,6 +548,53 @@ class PurchaseScanDbTests(unittest.TestCase):
             )
             self.assertIsNone(processed_source_row(conn, source_key_value=new_reply_key))
             conn.close()
+
+    def test_collect_records_processed_source_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "documents.sqlite3"
+            pdf_path = Path(td) / "견적.pdf"
+            json_path = Path(td) / "견적.json"
+            pdf_path.write_bytes(b"quote")
+            metadata = {
+                "doc_type": "estimate",
+                "all_doc_types": ["estimate"],
+                "vendor": "성경포토닉스",
+                "normalized_vendor": "성경포토닉스",
+                "issue_date": "2026-04-01",
+                "amount": 2956800,
+                "message_id": "message-quote",
+                "thread_id": "thread-quote",
+                "from": "sender@example.com",
+                "subject": "견적서",
+                "email_date": "2026-04-01T00:00:00+09:00",
+                "source": "gmail",
+                "source_type": "attachment",
+                "source_attachment_id": "att-quote",
+                "source_filename": "견적.pdf",
+                "source_size": 1234,
+                "saved_pdf": str(pdf_path),
+                "file_path": str(pdf_path),
+                "json_path": str(json_path),
+                "sha256": "quote-sha",
+                "confidence": 0.9,
+            }
+            conn = connect(db_path)
+            try:
+                record_processed_document(None, conn, metadata)
+                key = source_key(
+                    gmail_message_id="message-quote",
+                    source_type="attachment",
+                    source_attachment_id="att-quote",
+                    source_filename="견적.pdf",
+                    source_size=1234,
+                )
+                row = processed_source_row(conn, source_key_value=key)
+                self.assertTrue(processed_source_has_existing_document(row))
+                docs = load_documents(conn)
+                self.assertEqual(len(docs), 1)
+                self.assertEqual(docs[0]["doc_type"], "estimate")
+            finally:
+                conn.close()
 
     def test_backfill_processed_sources_from_documents(self) -> None:
         with tempfile.TemporaryDirectory() as td:

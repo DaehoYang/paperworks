@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -17,6 +16,8 @@ import yaml
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+from scripts.ocr.extractors import extract_text
 
 
 DEFAULT_PROJECT_NO = "202403110003"
@@ -185,10 +186,7 @@ def safe_count(locator: Any) -> int:
 
 
 def pdf_text(path: Path) -> str:
-    try:
-        return subprocess.check_output(["pdftotext", "-layout", str(path), "-"], text=True, stderr=subprocess.DEVNULL)
-    except Exception:
-        return ""
+    return extract_text(path)
 
 
 def compact_text(text: str) -> str:

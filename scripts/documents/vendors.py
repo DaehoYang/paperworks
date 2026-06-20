@@ -62,7 +62,12 @@ def canonical_vendor(value: str | None, aliases_path: Path = DEFAULT_VENDOR_ALIA
         return ""
     aliases = load_vendor_aliases(aliases_path)
     normalized = normalize_vendor(value)
-    return aliases.get(normalized) or value
+    if normalized in aliases:
+        return aliases[normalized]
+    for alias_key, canonical_name in sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True):
+        if len(alias_key) >= 3 and (alias_key in normalized or normalized in alias_key):
+            return canonical_name
+    return value
 
 
 def safe_name(value: str, fallback: str = "unknown") -> str:

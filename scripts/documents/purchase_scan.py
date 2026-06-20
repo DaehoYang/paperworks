@@ -12,6 +12,7 @@ from scripts.documents.vendors import parse_case_name
 DOCUMENT_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".hwp", ".hwpx", ".xls", ".xlsx"}
 IGNORED_NAMES = {"items.xls", "물품검수확인서_작성.pdf", "물품검수확인서.pdf"}
 IGNORED_DIRS = {
+    ".incoming",
     "imgs",
     "imgs1",
     "img",
@@ -104,6 +105,8 @@ def sidecar_document_types(file_path: Path) -> list[str]:
     except (OSError, json.JSONDecodeError):
         return []
 
+    raw_doc_type = metadata.get("doc_type")
+    primary = raw_doc_type if isinstance(raw_doc_type, str) else None
     values: list[str] = []
     raw_all = metadata.get("all_doc_types")
     if isinstance(raw_all, list):
@@ -118,9 +121,10 @@ def sidecar_document_types(file_path: Path) -> list[str]:
         if isinstance(parsed, list):
             values.extend(item for item in parsed if isinstance(item, str))
 
-    raw_doc_type = metadata.get("doc_type")
-    if isinstance(raw_doc_type, str):
-        values.append(raw_doc_type)
+    if primary == "tax_invoice":
+        values = [value for value in values if value not in {"business_registration", "bankbook_copy"}]
+    if primary:
+        values.insert(0, primary)
     return _ordered_doc_types(values)
 
 

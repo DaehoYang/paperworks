@@ -313,6 +313,22 @@ def upsert_processed_source(
     return int(row["id"]) if row else None
 
 
+def record_processed_document(
+    conn: sqlite3.Connection | None,
+    source_conn: sqlite3.Connection | None,
+    metadata: dict,
+    *,
+    reason: str = "collect documents",
+) -> None:
+    document_id = None
+    if conn:
+        document_id = upsert_document(conn, metadata)
+    if source_conn:
+        if document_id is None:
+            document_id = upsert_document(source_conn, metadata)
+        upsert_processed_source(source_conn, metadata, document_id=document_id, reason=reason)
+
+
 def processed_source_row(
     conn: sqlite3.Connection,
     *,

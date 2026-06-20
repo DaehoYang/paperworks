@@ -55,6 +55,15 @@ function fmtDate(value?: string) {
   return new Date(value).toLocaleString();
 }
 
+function jobFailed(job: { state?: string; returncode?: number | null }) {
+  return job.state === "failed" || (typeof job.returncode === "number" && job.returncode !== 0);
+}
+
+function jobStateText(job: { state?: string; returncode?: number | null }) {
+  const state = job.state || "unknown";
+  return job.returncode == null ? state : `${state} · ${job.returncode}`;
+}
+
 function Dashboard({
   data,
   onOpenFiles,
@@ -141,9 +150,10 @@ function Dashboard({
           <div className="panel-header"><h2>Recent Jobs</h2></div>
           {data.jobs.length === 0 ? <p className="muted">No jobs yet.</p> : null}
           {data.jobs.map((job) => (
-            <div className="job-row" key={job.id}>
+            <div className={`job-row ${jobFailed(job) ? "failed" : ""}`} key={job.id}>
               <strong>{job.kind || 'job'}</strong>
-              <span>{job.state} · {job.returncode ?? ''}</span>
+              <span>{jobStateText(job)}</span>
+              {job.errorSummary ? <span className="job-error">{job.errorSummary}</span> : null}
               <small>{job.id}</small>
             </div>
           ))}
@@ -277,9 +287,10 @@ function JobsView() {
         <div className="jobs-layout">
           <div className="jobs-list">
             {jobs.map((job) => (
-              <button className="job-card" key={job.id} onClick={() => void selectJob(job)}>
+              <button className={`job-card ${jobFailed(job) ? "failed" : ""}`} key={job.id} onClick={() => void selectJob(job)}>
                 <strong>{job.kind || "job"}</strong>
-                <span>{job.state || "unknown"} · {job.returncode ?? ""}</span>
+                <span>{jobStateText(job)}</span>
+                {job.errorSummary ? <span className="job-error">{job.errorSummary}</span> : null}
                 {job.caseDir ? <span>{job.caseDir}</span> : null}
                 <small>{job.id}</small>
               </button>
@@ -535,6 +546,7 @@ function App() {
   const [imageHelperPath, setImageHelperPath] = useState("/purchase");
   const [actionRunning, setActionRunning] = useState<ActionName | null>(null);
   const [message, setMessage] = useState("");
+  const [messageKind, setMessageKind] = useState<"error" | "success">("error");
   const activeJobKinds = useMemo(
     () =>
       new Set(
@@ -549,9 +561,19 @@ function App() {
 
   const refreshDashboard = useCallback(async () => {
     try {
-      setDashboard(await loadDashboard());
-      setMessage("");
+      const nextDashboard = await loadDashboard();
+      setDashboard(nextDashboard);
+      const latestJob = nextDashboard.jobs[0];
+      if (latestJob && jobFailed(latestJob)) {
+        setMessageKind("error");
+        setMessage(
+          `Job failed: ${latestJob.kind || "job"} (${latestJob.returncode ?? "unknown"}). ${
+            latestJob.errorSummary || "Open Jobs for logs."
+          }`,
+        );
+      }
     } catch (error) {
+      setMessageKind("error");
       setMessage(error instanceof Error ? error.message : String(error));
     }
   }, []);
@@ -580,9 +602,11 @@ function App() {
     setActionRunning(action);
     try {
       const result = await startAction(action);
+      setMessageKind("success");
       setMessage(`${label}: started ${result.jobs.length} job${result.jobs.length === 1 ? "" : "s"}.`);
       await refreshDashboard();
     } catch (error) {
+      setMessageKind("error");
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setActionRunning(null);
@@ -618,7 +642,7 @@ function App() {
         <button className={isActionBusy("process_receipts") ? "running" : ""} disabled={isActionBusy("process_receipts")} onClick={() => void runAction("process_receipts", "Process Receipts")}>Process Receipts</button>
         <button onClick={() => setView("jobs")}>Jobs</button>
       </div>
-      {message && <div className="error-banner">{message}</div>}
+      {message && <div className={messageKind === "success" ? "success-banner" : "error-banner"}>{message}</div>}
       {renderCurrentView()}
     </main>
   );
