@@ -1,281 +1,394 @@
 # Paperworks
 
-회의비 영수증, 출장 교통비 영수증, 구매 견적서를 처리해 제출용 PDF와 업로드용 Excel 파일을 만드는 자동화 패키지다. 실행 코드는 `scripts/paperwork/`에 모아두고, 실제 데이터는 `meeting/`, `purchase/` 아래에 둔다.
-
-기본 PDF 작성 방식은 **AcroForm 입력**이다. 회의록, 출장보고서, 물품검수확인서는 입력 가능한 PDF form에 값을 채운다. 영수증 이미지는 최종 PDF 뒤쪽에 첨부하며, 첨부용 이미지는 PDF 용량을 줄이기 위해 1MB 이하 JPEG로 압축한다. 원본 영수증 파일은 덮어쓰지 않는다.
+가천대 연구비 행정 처리를 위한 자동화 도구다. Gmail에서 구매 증빙을 수집해 `purchase/` 폴더를 정리하고, 회의비/출장비 영수증과 구매 검수 서류를 생성하며, 준비된 구매 건을 포털에 업로드한다.
 
 ## 설치
 
+저장소 루트에서 실행한다.
+
 ```bash
-python3 -m pip install pypdf reportlab pillow pyyaml openpyxl xlrd xlwt
+python3 -m pip install --user -r scripts/documents/requirements.txt
+python3 -m pip install --user -r scripts/gui/requirements.txt
+python3 -m pip install --user pypdf reportlab pillow pyyaml openpyxl xlrd xlwt playwright
+python3 -m playwright install chromium
 sudo apt-get update
 sudo apt-get install -y poppler-utils
 ```
 
-OCR API와 LiteLLM을 쓸 때:
+React GUI를 쓸 때:
 
 ```bash
-export DHLAB_OCR_API_KEY="..."
-export DHLAB_OCR_API_URL="https://dhlab.gachon.ac.kr/services/rag/ocr"
-export DHLAB_LITELLM_API_KEY="..."
-export DHLAB_LITELLM_BASE_URL="https://dhlab.gachon.ac.kr/services/litellm/v1"
-export DHLAB_LITELLM_MODEL="local"
+cd scripts/gui/frontend
+npm install
+npm run build
 ```
 
-## 구조
+필요한 로컬 설정 파일:
 
 ```text
-scripts/paperwork/
-  assets/                  # 입력가능 PDF form assets
-  common/                  # 공통 OCR, PDF text, LLM, schema 검증
-  meeting/                 # 회의록/출장보고서 처리
-  purchase/                # 물품검수확인서 처리
+credentials.json          # Gmail OAuth desktop app credential
+secret.json               # 포털 로그인 정보
+projects.yml              # 과제 번호/과제명/기본 검수자 정보
+```
+
+`credentials.json`, `secret.json`, token, API key는 커밋하지 않는다.
+
+## 주요 폴더
+
+```text
+purchase/
+  .incoming/              # Gmail에서 수집했지만 아직 배치 전인 후보
+  .incoming/originals/    # 결합 PDF 원본 보존 위치
+  documents.sqlite3       # 문서/처리 이력 DB
+  vendors/                # 업체별 사업자등록증/통장사본 재사용 저장소
+  <YYMMDD>_<업체명>/       # 구매 케이스
 
 meeting/
-  receipt/                 # 새 영수증 투입 위치
-  receipt/used/            # 생성 완료 후 이동된 영수증
-  receipt/ocr_text/        # OCR 원문
-  receipt/records.csv      # 처리 ledger
-  receipt/summary.csv      # 회의록 요약 및 참석자 분산 이력
-  output/                  # 회의록/출장보고서 출력
-
-purchase/
-  <purchase_case>/          # 견적, 원본 검수서, 사진, 출력물
+  receipt/                # 새 영수증 투입 위치
+  receipt/used/           # 처리 완료 영수증
+  output/                 # 회의록/출장보고서 출력
 ```
 
-## Meeting / Trip
+구매 케이스 표준 파일명:
 
-새 영수증은 `meeting/receipt/`에 넣고 실행한다.
+```text
+전세.pdf                  # 전자세금계산서
+견적.pdf                  # 견적서
+거명.pdf                  # 거래명세서
+사업자등록증.pdf
+통장사본.pdf
+items.xls
+물품검수확인서_작성.pdf
+```
+
+## React GUI
+
+React/FastAPI GUI는 Dashboard, 파일 브라우저, 작업 로그, 이미지 업로드 도우미를 제공한다.
 
 ```bash
-python3 -m scripts.paperwork.meeting.process_receipts meeting/receipt/*.jpg meeting/receipt/*.png meeting/receipt/*.pdf
+python3 scripts/gui/run_react.py --port 45001 --detach
 ```
 
-기본 동작:
+Jupyter proxy 환경에서는 다음 주소로 접속한다.
 
-- `food_drink`, `restaurant`, `cafe`, `meal`, `drink`: 회의록 생성
-- `transport`: 왕복 pair를 찾아 출장보고서 생성
-- 생성 완료된 입력 영수증은 `meeting/receipt/used/`로 이동
-- 이동을 막고 싶으면 `--no-archive-receipts` 사용
-- OCR 원문은 `meeting/receipt/ocr_text/`에 저장
-- 처리하지 못한 파일은 `records.csv`에 `review`로 기록
+```text
+https://dhlab.gachon.ac.kr/user/sheepvs5/proxy/45001/
+```
+
+GUI에서 할 수 있는 일:
+
+- `purchase/`, `meeting/` 파일 탐색과 PDF preview
+- 파일 업로드, rename, move/copy, download
+- Dashboard에서 구매 케이스 상태 확인
+- 구매 사진을 품목 번호에 맞춰 정리
+- 장시간 작업의 job log 확인
+
+파일 API는 `purchase/`와 `meeting/`만 노출한다. dotfile, token, credential, secret 파일은 차단하고, 삭제는 `scripts/gui/trash/`로 이동한다.
+
+## 구매 문서 수집
+
+매일 실행할 기본 명령:
+
+```bash
+HOMETAX_PASSWORD=1234567890 python3 scripts/documents/run_daily.py
+```
+
+기본 Gmail 검색 범위는 최근 90일이다. 견적서/거래명세서와 전자세금계산서가 몇 주 간격으로 도착하는 경우가 있어서 넓게 잡는다. 범위를 바꾸려면:
+
+```bash
+HOMETAX_PASSWORD=1234567890 python3 scripts/documents/run_daily.py --newer-than 2m
+```
+
+저장 없이 검색/분류만 확인:
+
+```bash
+python3 scripts/documents/run_daily.py --newer-than 2m --dry-run --no-labels
+```
+
+동작 요약:
+
+1. Gmail에서 전자세금계산서, 견적서, 거래명세서, 사업자등록증, 통장사본 후보를 찾는다.
+2. 이미 처리된 Gmail 첨부/링크는 `processed_sources`와 실제 저장 파일을 기준으로 건너뛴다.
+3. 새 문서는 PDF와 JSON metadata로 `purchase/.incoming/`에 저장한다.
+4. 결합 PDF는 원본을 보존하고, 필요한 경우 페이지/range 단위로 분할해 검증된 조각만 저장한다.
+5. 전자세금계산서를 기준으로 구매 폴더를 만들거나 기존 incomplete 폴더를 보강한다.
+6. 사업자등록증/통장사본은 `purchase/vendors/<업체명>/`에 저장하고 같은 업체 구매 폴더에 복사한다.
+7. 구매 케이스 상태와 SQLite DB를 갱신한다.
+8. 완료된 Gmail 메시지는 `TaxInvoice/finished` 라벨로 승격한다.
+
+Gmail 라벨은 아래 세 개만 사용한다.
+
+```text
+TaxInvoice/finished
+TaxInvoice/processed
+TaxInvoice/unprocessed
+```
+
+기존 라벨 정리:
+
+```bash
+python3 scripts/documents/cleanup_gmail_labels.py
+```
+
+## 문서 분류와 결합 PDF 처리
+
+기존 빠른 분류는 유지한다.
+
+- 메일 제목/본문/보낸 사람
+- 첨부파일명
+- PDF 내장 텍스트
+
+OCR/page split은 필요한 PDF에만 fallback으로 실행한다. split trigger는 다음 구조다.
+
+```text
+PDF가 2페이지 이상
+그리고 다음 중 하나 이상:
+  - all_doc_types가 2개 이상
+  - tax_invoice 또는 vendor 문서 validation 실패
+  - PDF 전체 텍스트에 서로 다른 문서 시작 신호가 2개 이상 있음
+  - 파일명/메일 제목에 결합 문서 힌트가 있음
+```
+
+split 대상 문서:
+
+```text
+tax_invoice
+estimate
+statement
+business_registration
+bankbook_copy
+```
+
+분할 방식:
+
+1. PDF를 페이지별로 나눈다.
+2. 각 페이지를 분석해 doc_type 후보와 validation 결과를 만든다.
+3. 연속 페이지를 segment로 묶는다.
+4. segment PDF를 다시 만들고 segment 단위로 validation한다.
+5. 통과한 segment만 `.incoming`에 저장한다.
+6. 원본 결합 PDF는 `.incoming/originals/`에 보존한다.
+
+`estimate`, `statement`는 품목/수량/단가/금액 같은 continuation 신호가 있으면 다음 페이지를 붙일 수 있다. `tax_invoice`도 전자계산서/합계금액/공급가액/승인번호 같은 신호가 있으면 continuation을 허용한다. `business_registration`, `bankbook_copy`는 기본적으로 1페이지 문서로 본다.
+
+전자세금계산서 validation 기준:
+
+```text
+metadata:
+  vendor
+  issue_date
+  amount
+
+PDF text:
+  /전자.{0,20}계산서/
+  합계금액
+```
+
+이 기준은 `전자세금계산서`, `전자수정세금계산서`, `전자(세금)계산서`를 모두 허용한다.
+
+## 구매 폴더 상태 확인
+
+전체 purchase 상태:
+
+```bash
+python3 scripts/documents/check_purchase_docs.py purchase
+```
+
+특정 구매 폴더:
+
+```bash
+python3 scripts/documents/check_purchase_docs.py purchase/260608_메타컴퍼니 --format json
+```
+
+상태 의미:
+
+- `incomplete`: 필요한 문서 일부가 없다.
+- `ready`: 전자세금계산서, 견적서, 거래명세서가 있다.
+- `finished`: 세금계산서형은 5종 문서가 모두 있고, 카드결제형은 영수증, 견적서, 거래명세서가 있다.
+
+전자세금계산서 기준 매칭 상태 확인:
+
+```bash
+python3 scripts/documents/check_tax_invoice_cases.py
+```
+
+수동 배치 계획 확인:
+
+```bash
+python3 scripts/documents/place_purchase_docs.py
+```
+
+수동 배치 적용:
+
+```bash
+python3 scripts/documents/place_purchase_docs.py \
+  --archive purchase/.incoming \
+  --apply \
+  --sync-db \
+  --refresh-vendor-store \
+  --include-vendor-docs
+```
+
+## 구매 검수 서류 생성
+
+구매 폴더에 견적서와 사진을 준비한 뒤 실행한다.
+
+```bash
+python3 -m scripts.paperwork.purchase.process_purchase \
+  purchase/260608_메타컴퍼니 \
+  --project-id 202601800001
+```
 
 출력:
 
-- 회의록: `meeting/output/<YYMMDD>_<HHMM>_회의록.pdf`
-- 출장보고서: `meeting/output/<YYMMDD>_출장보고서.pdf`
+```text
+purchase/<case>/items.xls
+purchase/<case>/물품검수확인서_작성.pdf
+```
 
-OCR 대신 구조화 JSON을 넣을 수 있다.
+`--quote`를 생략하면 구매 폴더에서 `견적` 또는 `견적서`가 들어간 파일을 고른다. `--images`를 생략하면 `imgs`, `imgs1`, `img`, 케이스 폴더 순서로 사진을 찾는다.
+
+견적서 parser 지정:
+
+```bash
+python3 -m scripts.paperwork.purchase.process_purchase purchase/<case> --parse-engine auto
+python3 -m scripts.paperwork.purchase.process_purchase purchase/<case> --parse-engine pdf-text
+python3 -m scripts.paperwork.purchase.process_purchase purchase/<case> --parse-engine codex
+```
+
+## 회의비/출장비 영수증 처리
+
+새 영수증을 `meeting/receipt/`에 넣고 실행한다.
 
 ```bash
 python3 -m scripts.paperwork.meeting.process_receipts \
-  --metadata-json /tmp/receipt_records.json
-```
-
-엔진을 직접 지정할 수도 있다.
-
-```bash
-python3 -m scripts.paperwork.meeting.process_receipts meeting/receipt/receipt.jpg \
-  --ocr-engine ocr-api-litellm
-
-python3 -m scripts.paperwork.meeting.process_receipts meeting/receipt/receipt.jpg \
-  --ocr-engine codex
-```
-
-### 회의록 규칙
-
-`scripts/paperwork/assets/information.yml`에서 회의록과 출장보고서 설정을 관리한다.
-
-- `project`: 과제번호, 연구책임자, 과제명, 연구기간
-- `trip`: 출장보고서 연구책임자와 출장자 내역
-- `members`: 내부 참석자 후보
-- `external_members`: 특정 회의장소에서만 쓰는 외부 참석자
-- `meeting_places`, `*_districts`: 주소 기반 회의장소 판정
-- `topics`, `topic_order`: 일반 회의 topic
-- `external_topics`, `external_topic_order`: 외부 공동연구 회의 topic
-- `attendee_rules`: 회의 참석 인원 산정 규칙
-
-회의일시는 영수증 시간 1시간 전을 기준으로 가장 가까운 30분 단위에서 시작하고, 영수증 시간을 포함하면서 최소 1시간 이상이 되도록 30분 단위로 종료한다.
-
-회의 참석자 수:
-
-- 기본값은 `ceil(total_price / attendee_rules.price_per_person)`
-- `min_attendees`와 `max_attendees` 범위로 제한
-- 음료만 있는 영수증은 음료 수량을 하한으로 사용
-- `max_attendee_store_exceptions`에 등록된 매장은 지정 금액 이상이면 `max_attendees` 사용
-- 현재 기본 예외: `쩡이네`, `쟁이네`, `평이네`가 100000원 이상이면 최대 참석자
-
-참석자 선택:
-
-- `fixed_first_attendee`는 항상 첫 번째 참석자
-- 장소별 `external_members`는 먼저 고정
-- 남은 자리는 `대학원생`을 우선 배치
-- 대학원생끼리는 `summary.csv` 이력 기준으로 덜 나온 사람부터 선택
-- 대학원생만으로 부족하면 다른 학생을 같은 방식으로 선택
-- 그래도 부족할 때만 조교수 등 나머지 구성원 사용
-- 동률일 때는 영수증 날짜와 파일명 기반 해시로 순서를 정해 재실행 결과를 유지
-
-출장 pair 조건:
-
-- 갈 때: 서울 출발
-- 올 때: 서울 도착
-- 같은 목적지
-- 당일 또는 다음날 복귀
-- pair를 찾지 못하면 `records.csv`에 기록 후 에러 종료
-
-## Purchase
-
-구매 폴더 예시:
-
-```text
-purchase/260401_optics/
-  견적.pdf
-  물품검수확인서.pdf
-  imgs/
-    1.jpg
-    2.jpg
-```
-
-실행:
-
-```bash
-python3 -m scripts.paperwork.purchase.process_purchase purchase/260401_optics --inspection-date 2026-05-25
+  meeting/receipt/*.jpg meeting/receipt/*.png meeting/receipt/*.pdf
 ```
 
 출력:
 
-- `purchase/<case>/items.xls`
-- `purchase/<case>/물품검수확인서_작성.pdf`
-
-`--quote`를 생략하면 구매 폴더에서 파일명에 `견적` 또는 `견적서`가 들어간 파일을 자동 선택한다. `--images`를 생략하면 `imgs`, `imgs1`, `img` 순서로 사진 폴더를 찾는다. 날짜를 생략하면 실행일을 검수일로 쓴다.
-
-견적서 파서:
-
-- `auto`: PDF 텍스트 추출을 먼저 쓰고, 실패하면 OCR/LiteLLM 또는 Codex fallback
-- `pdf-text`: `pdftotext` 결과만 사용
-- `ocr-litellm`: OCR API 텍스트 + LiteLLM JSON 추출
-- `codex`: Codex CLI로 견적서 JSON 추출
-
-예:
-
-```bash
-python3 -m scripts.paperwork.purchase.process_purchase purchase/260401_optics --parse-engine auto
-
-python3 -m scripts.paperwork.purchase.process_purchase purchase/260401_optics \
-  --parse-engine ocr-litellm \
-  --ocr-api-key "$DHLAB_OCR_API_KEY" \
-  --litellm-api-key "$DHLAB_LITELLM_API_KEY"
-```
-
-### 구매 금액 규칙
-
-`items.xls`는 `EzBaroItemReg_Sample.xls`와 같은 구형 Excel `.xls` 형식이며, 시트명은 `이지바로품목`이다.
-
-- `순번`: 1부터 시작하는 항목 번호
-- `품명`: 모델명 중심 품목명, 50자 이하
-- `규격`: 상세 규격, 80자 이하
-- `수량`: 구매 수량
-- `단가`: 부가세 포함 1개 가격
-- `공급가액`: 부가세 없는 N개 합계
-- `부가세액`: `공급가액 * 10%`
-- `총구입액`: `공급가액 + 부가세액`
-- `용도설명`: 빈칸
-
-견적서마다 표의 `단가`와 `공급가액` 의미가 다를 수 있으므로, 스크립트는 견적서 하단의 공급가액, VAT, 합계와 대조해서 가장 잘 맞는 해석을 자동 선택한다. 최종 `normalized_totals`가 견적서 하단 합계와 맞지 않으면 에러를 낸다.
-
-업로드 오류를 막기 위해 저장 전에 문자열을 정리한다. `Ø`는 `D`로 바꾸고, 쉼표, 따옴표, slash, 등호 등 문제가 되는 특수문자를 제거한다.
-
-## Form Assets
-
-입력가능 PDF는 `scripts/paperwork/assets/`에서 관리한다.
-
 ```text
-scripts/paperwork/assets/
-  바나연회의록_빈칸.pdf
-  바나연회의록_입력가능.pdf
-  출장보고서.pdf
-  출장보고서_입력가능.pdf
-  물품검수확인서_입력가능.pdf
+meeting/output/<YYMMDD>_<HHMM>_회의록.pdf
+meeting/output/<YYMMDD>_출장보고서.pdf
 ```
 
-재생성:
+처리 완료 영수증은 기본적으로 `meeting/receipt/used/`로 이동한다. 이동을 막으려면:
 
 ```bash
-python3 -m scripts.paperwork.meeting.create_minutes_form
-python3 -m scripts.paperwork.meeting.create_trip_report_form
-python3 -m scripts.paperwork.purchase.create_inspection_form purchase/260401_optics/물품검수확인서.pdf
+python3 -m scripts.paperwork.meeting.process_receipts meeting/receipt/*.jpg --no-archive-receipts
 ```
 
-처리와 동시에 물품검수확인서 form asset을 다시 만들려면:
+OCR engine 지정:
 
 ```bash
-python3 -m scripts.paperwork.purchase.process_purchase purchase/260401_optics --rebuild-form
+python3 -m scripts.paperwork.meeting.process_receipts meeting/receipt/receipt.jpg --ocr-engine codex
+python3 -m scripts.paperwork.meeting.process_receipts meeting/receipt/receipt.jpg --ocr-engine ocr-api-litellm
 ```
 
-Form 원칙:
+회의록/출장보고서 규칙은 `scripts/paperwork/assets/information.yml`에서 관리한다.
 
-- 원본 PDF는 그대로 두고 입력가능 PDF를 별도 생성
-- 한글 입력을 위해 원본 PDF에 포함된 embedded 한글 폰트 사용
-- 회의록은 AcroForm field value만 채우고 `/NeedAppearances=True`로 저장
-- 출장보고서는 `pypdf` appearance 재생성 경로 사용
-- 물품검수확인서는 AcroForm field value와 `NeedAppearances=True` 사용
-- 사진과 영수증은 편집 필드가 아니라 PDF 이미지로 첨부
+## 포털 업로드
+
+사전검사:
+
+```bash
+python3 scripts/upload/gachon_portal_upload.py \
+  --project-id 202601800001 \
+  --case-dir purchase/260608_메타컴퍼니 \
+  --step preflight
+```
+
+임시저장까지 실행:
+
+```bash
+python3 scripts/upload/gachon_portal_upload.py \
+  --project-id 202601800001 \
+  --case-dir purchase/260608_메타컴퍼니 \
+  --step fill-save
+```
+
+저장 후 바로 신청까지 시도:
+
+```bash
+python3 scripts/upload/gachon_portal_upload.py \
+  --project-id 202601800001 \
+  --case-dir purchase/260608_메타컴퍼니 \
+  --step fill-submit
+```
+
+여러 구매 건을 하나의 청구서에 묶기:
+
+```bash
+python3 scripts/upload/gachon_portal_upload.py \
+  --project-id 202601800001 \
+  --case-dir purchase/260608_메타컴퍼니 \
+  --case-dir purchase/260609_엔티렉스 \
+  --step fill-save
+```
+
+브라우저를 보면서 단계별 실행:
+
+```bash
+python3 scripts/upload/gachon_portal_upload.py --interactive --headed
+```
+
+주요 옵션:
+
+- `--project-id`: `projects.yml`의 과제 key 또는 과제번호
+- `--case-dir`: 구매 폴더. 여러 번 지정 가능
+- `--draft-total`: 기존 임시저장 건을 열 때 사용할 금액
+- `--secret`: 포털 로그인 정보 파일
+- `--profile`: Playwright persistent profile 경로
+- `--headed`: 브라우저 창 표시
+- `--step`: `preflight`, `fill-save`, `fill-submit`, `submit-draft`, `append-draft` 등
+
+포털 서버 검증에서 예산 초과, 권한 부족, 필수 입력 누락, 거래처 정보 오류가 나오면 자동화는 신청 완료로 보지 않고 중단한다.
+
+## OCR reader
+
+공통 OCR reader는 `scripts/ocr`에 있다. 기본 순서:
+
+1. PDF/HTML/text 내장 텍스트 추출
+2. 필요한 필드 validation 실패 시 Codex image fallback
+
+OCR API는 기본 경로가 아니며, 명시적으로 method를 넣을 때만 사용한다.
+
+수동 테스트:
+
+```bash
+python3 -m scripts.ocr.cli path/to/document.pdf \
+  --doc-type estimate \
+  --output /tmp/document.read.json \
+  --overwrite
+```
 
 ## 검증
 
-문법 체크:
+문서 수집 테스트:
 
 ```bash
-python3 -m py_compile $(find scripts/paperwork -name '*.py')
+python3 -m unittest discover -s scripts/documents/tests
 ```
 
-설정 체크:
+주요 Python 문법 검사:
 
 ```bash
-python3 - <<'PY'
-import yaml
-from pathlib import Path
-config = yaml.safe_load(Path("scripts/paperwork/assets/information.yml").read_text())
-print("members", len(config["members"]))
-print("meeting_places", list(config["meeting_places"]))
-print("topics", list(config["topics"]))
-PY
+python3 -m py_compile \
+  scripts/documents/collect_documents.py \
+  scripts/documents/ocr_metadata.py \
+  scripts/upload/gachon_portal_upload.py \
+  scripts/paperwork/purchase/process_purchase.py
 ```
 
 PDF 구조 확인:
 
 ```bash
-pdfinfo meeting/output/<YYMMDD>_<HHMM>_회의록.pdf
-pdfinfo meeting/output/<YYMMDD>_출장보고서.pdf
 pdfinfo purchase/<case>/물품검수확인서_작성.pdf
+pdfinfo meeting/output/<file>.pdf
 ```
 
 PDF 렌더링 확인:
 
 ```bash
 mkdir -p /tmp/pdf_check
-pdftoppm -png -f 1 -l 3 -r 120 meeting/output/<file>.pdf /tmp/pdf_check/page
+pdftoppm -png -f 1 -l 3 -r 120 purchase/<case>/물품검수확인서_작성.pdf /tmp/pdf_check/page
 ```
-
-AcroForm 필드 확인:
-
-```bash
-python3 - <<'PY'
-from pypdf import PdfReader
-for path in [
-    "meeting/output/260522_1230_회의록.pdf",
-    "meeting/output/260421_출장보고서.pdf",
-]:
-    reader = PdfReader(path)
-    acro = reader.trailer["/Root"].get("/AcroForm")
-    print(path, "fields", len(reader.get_fields() or {}), "acro", bool(acro))
-PY
-```
-
-## 문제 해결
-
-- OCR API 호출 실패: `DHLAB_OCR_API_KEY`, `DHLAB_OCR_API_URL` 확인
-- LiteLLM 호출 실패: `DHLAB_LITELLM_API_KEY`, `DHLAB_LITELLM_BASE_URL`, `DHLAB_LITELLM_MODEL` 확인
-- 음식점/카페인데 review로 빠짐: metadata JSON에서 `receipt_type: food_drink`로 보정 후 재실행
-- 출장 pair 에러: `origin`, `destination`, 날짜가 서울 출발/서울 도착 조건을 만족하는지 확인
-- PDF가 뷰어마다 다르게 보임: AcroForm 필드 수와 `/NeedAppearances` 값을 먼저 확인하고, 필요하면 form asset을 재생성
