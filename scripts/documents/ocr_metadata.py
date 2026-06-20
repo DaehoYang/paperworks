@@ -87,7 +87,18 @@ def merge_read_result(metadata: dict[str, Any], result: ReadResult) -> None:
 
 
 def merge_structured_fields(metadata: dict[str, Any], data: dict[str, Any], *, overwrite: bool) -> None:
-    for key in ("vendor", "issue_date", "amount", "item_count", "document_number", "item_code"):
+    for key in (
+        "vendor",
+        "issue_date",
+        "amount",
+        "item_count",
+        "document_number",
+        "item_code",
+        "bank_name",
+        "account_holder",
+        "account_number",
+        "business_registration_number",
+    ):
         value = data.get(key)
         if value_is_empty(value):
             continue
