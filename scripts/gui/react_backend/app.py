@@ -17,7 +17,7 @@ from urllib.parse import quote
 import yaml
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -28,6 +28,8 @@ from scripts.documents.classifiers import (
     required_documents_for_doc_types,
 )
 from scripts.documents.purchase_scan import scan_purchase_root
+from scripts.documents.db import connect as connect_documents_db
+from scripts.documents.db import purchase_workflow_for_case_dir
 from scripts.gui.services import automation as automation_services
 from scripts.gui.services import files as file_services
 from scripts.gui.services import jobs as job_services
@@ -39,6 +41,7 @@ from scripts.gui.services.paths import MEETING_DIR, PURCHASE_DIR, ROOT_DIR, TRAS
 
 
 FRONTEND_DIST = ROOT_DIR / "scripts" / "gui" / "frontend" / "dist"
+PURCHASE_DB = PURCHASE_DIR / "documents.sqlite3"
 ALLOWED_ROOTS = {
     "purchase": PURCHASE_DIR,
     "meeting": MEETING_DIR,
@@ -54,6 +57,33 @@ BLOCKED_NAMES = {
 BLOCKED_SUFFIXES = {".py", ".sh", ".bash", ".zsh", ".env", ".key", ".pem"}
 ALLOWED_UPLOAD_SUFFIXES = file_services.UPLOAD_EXTENSIONS
 MEETING_INTERNAL_NAMES = {"meeting.sqlite3", "records.csv", "summary.csv"}
+
+
+def service_prefix() -> str:
+    raw = os.environ.get("PAPERWORKS_BASE_PATH") or os.environ.get("JUPYTERHUB_SERVICE_PREFIX") or ""
+    prefix = "/" + raw.strip("/")
+    return "" if prefix == "/" else prefix
+
+
+class StripServicePrefixMiddleware:
+    def __init__(self, app, prefix: str):
+        self.app = app
+        self.prefix = prefix.rstrip("/")
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not self.prefix:
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path") or ""
+        if path == self.prefix:
+            response = RedirectResponse(f"{self.prefix}/")
+            await response(scope, receive, send)
+            return
+        if path.startswith(f"{self.prefix}/"):
+            scope = dict(scope)
+            scope["root_path"] = self.prefix
+            scope["path"] = path[len(self.prefix) :] or "/"
+        await self.app(scope, receive, send)
 
 
 @dataclass(frozen=True)
@@ -324,10 +354,28 @@ def purchase_uploaded(case_dir: Path) -> bool:
     return isinstance(status, dict) and status.get("uploaded") is True
 
 
+def purchase_db_workflow(case_dir: Path) -> dict[str, object]:
+    if not PURCHASE_DB.exists():
+        return {}
+    conn = connect_documents_db(PURCHASE_DB)
+    try:
+        row = purchase_workflow_for_case_dir(conn, case_dir)
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
 def purchase_workflow_label(doc_status: str, case_dir: Path) -> dict[str, object]:
     image_count = len(purchase_image_paths(case_dir))
     generated = purchase_generated(case_dir)
     uploaded = purchase_uploaded(case_dir)
+    workflow = purchase_db_workflow(case_dir)
+    items_status = str(workflow.get("items_status") or ("generated" if (case_dir / "items.xls").exists() else "pending"))
+    items_label = {
+        "generated": "items ready",
+        "failed": "items failed",
+        "pending": "items pending",
+    }.get(items_status, f"items {items_status}")
     if uploaded:
         workflow_status = "uploaded"
     elif generated:
@@ -338,7 +386,9 @@ def purchase_workflow_label(doc_status: str, case_dir: Path) -> dict[str, object
         workflow_status = "no images"
     return {
         "workflowStatus": workflow_status,
-        "statusLabel": f"{doc_status} · {workflow_status}",
+        "itemsStatus": items_status,
+        "itemsError": workflow.get("items_error") or "",
+        "statusLabel": f"{doc_status} · {items_label} · {workflow_status}",
         "imageCount": image_count,
         "generated": generated,
         "uploaded": uploaded,
@@ -518,6 +568,7 @@ def reject_duplicate_action(kind: str) -> None:
 
 
 app = FastAPI(title="Paperworks React GUI")
+app.add_middleware(StripServicePrefixMiddleware, prefix=service_prefix())
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],

@@ -671,6 +671,16 @@ body {
   background: #eff6ff;
 }
 
+.drop-zone.active {
+  border-color: #2563eb;
+  background: #dbeafe;
+}
+
+.drop-zone.disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
 .drop-zone input {
   display: none;
 }
@@ -691,24 +701,20 @@ body {
 .pending-image-row,
 .saved-image-row {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
+  grid-template-columns: 288px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
   border: 1px solid #e5e7eb;
   border-radius: 6px;
-  padding: 8px;
+  padding: 12px;
   background: #fff;
-}
-
-.saved-image-row {
-  grid-template-columns: 72px minmax(0, 1fr);
 }
 
 .pending-image-row img,
 .saved-image-row img {
-  width: 72px;
-  height: 72px;
-  object-fit: cover;
+  width: 288px;
+  height: 288px;
+  object-fit: contain;
   border-radius: 4px;
   border: 1px solid #e5e7eb;
   background: #f8fafc;
@@ -853,21 +859,18 @@ body {
 
   .pending-image-row,
   .saved-image-row.editable {
-    grid-template-columns: 64px minmax(0, 1fr);
-  }
-
-  .saved-image-row.editable {
     grid-template-columns: 1fr;
   }
 
+  .pending-image-row img,
   .saved-image-row.editable img {
     width: 100%;
     height: auto;
-    max-height: 320px;
+    max-height: 520px;
   }
 
   .pending-image-row button {
-    grid-column: 2;
+    grid-column: auto;
     justify-self: start;
   }
 

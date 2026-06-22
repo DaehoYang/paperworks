@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from scripts.documents.db import (
     upsert_document,
     upsert_processed_source,
     upsert_purchase_case,
+    upsert_purchase_workflow,
 )
 from scripts.documents.ocr_metadata import enrich_metadata_from_pdf, structured_payload
 from scripts.documents.purchase_scan import scan_purchase_root
@@ -397,6 +399,113 @@ def sync_purchase_case_from_local(case_dir: Path, db_path: Path) -> None:
         conn.close()
 
 
+def local_purchase_case_id(case_dir: Path, db_path: Path) -> int | None:
+    scanned = scan_purchase_root(case_dir)
+    if not scanned:
+        return None
+    case = scanned[0]
+    conn = connect(db_path)
+    try:
+        case_db = case.as_db_dict()
+        case_db["status"] = case_status_from_doc_types(set(case.local_docs))
+        case_id = upsert_purchase_case(conn, case_db)
+        replace_local_purchase_documents(conn, case_id, case.local_docs)
+        return case_id
+    finally:
+        conn.close()
+
+
+def items_current(case_dir: Path, quote_path: Path) -> bool:
+    items_path = case_dir / "items.xls"
+    return items_path.exists() and items_path.stat().st_mtime >= quote_path.stat().st_mtime
+
+
+def record_items_workflow(db_path: Path, case_id: int, **updates: object) -> None:
+    conn = connect(db_path)
+    try:
+        upsert_purchase_workflow(conn, case_id, updates)
+    finally:
+        conn.close()
+
+
+def prepare_purchase_items(case_dir: Path, db_path: Path) -> str:
+    from scripts.paperwork.purchase.process_purchase import (
+        DEFAULT_LITELLM_BASE_URL,
+        DEFAULT_OCR_API_URL,
+        find_quote_file,
+        prepare_items_xls,
+    )
+
+    case_id = local_purchase_case_id(case_dir, db_path)
+    if case_id is None:
+        return "skipped:no_case"
+    try:
+        quote_path = find_quote_file(case_dir)
+    except FileNotFoundError:
+        record_items_workflow(
+            db_path,
+            case_id,
+            items_status="pending",
+            items_generated_at=None,
+            items_error="missing_estimate",
+        )
+        return "pending:missing_estimate"
+
+    if items_current(case_dir, quote_path):
+        record_items_workflow(
+            db_path,
+            case_id,
+            items_status="generated",
+            items_generated_at=datetime.fromtimestamp((case_dir / "items.xls").stat().st_mtime, timezone.utc).isoformat(),
+            items_error=None,
+        )
+        return "generated:current"
+
+    try:
+        prepare_items_xls(
+            quote_pdf=quote_path,
+            items_path=case_dir / "items.xls",
+            parse_engine="auto",
+            ocr_api_url=os.environ.get("DHLAB_OCR_API_URL", DEFAULT_OCR_API_URL),
+            ocr_api_key=os.environ.get("DHLAB_OCR_API_KEY") or os.environ.get("DHLAB_LITELLM_API_KEY", ""),
+            litellm_base_url=os.environ.get("DHLAB_LITELLM_BASE_URL", DEFAULT_LITELLM_BASE_URL),
+            litellm_api_key=os.environ.get("DHLAB_LITELLM_API_KEY", ""),
+            litellm_model=os.environ.get("DHLAB_LITELLM_MODEL", "local"),
+            codex_bin="codex",
+            codex_model=None,
+            timeout=180,
+        )
+    except Exception as exc:
+        record_items_workflow(
+            db_path,
+            case_id,
+            items_status="failed",
+            items_generated_at=None,
+            items_error=str(exc),
+        )
+        return "failed"
+
+    record_items_workflow(
+        db_path,
+        case_id,
+        items_status="generated",
+        items_generated_at=datetime.now(timezone.utc).isoformat(),
+        items_error=None,
+    )
+    return "generated"
+
+
+def prepare_purchase_items_for_cases(purchase_root: Path, db_path: Path) -> dict[str, str]:
+    results: dict[str, str] = {}
+    for case in scan_purchase_root(purchase_root):
+        if not case.path.name[:1].isdigit():
+            continue
+        if "tax_invoice" not in case.local_docs:
+            continue
+        results[str(case.path)] = prepare_purchase_items(case.path, db_path)
+    return results
+
+
 def fill_existing_card_payment_cases(
     *,
     docs: list[dict],
@@ -661,6 +770,9 @@ def main() -> int:
         for plan in plans:
             target = apply_plan(plan, db_path, move_sources=args.move_sources)
             print(f"placed: {target}")
+    if db_path and (args.apply or args.sync_db):
+        for case_dir, result in sorted(prepare_purchase_items_for_cases(args.purchase_root, db_path).items()):
+            print(f"items-prepare: {result} {case_dir}")
     return 0
 
 

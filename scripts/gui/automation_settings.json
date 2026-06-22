@@ -6,6 +6,8 @@
     "202601800001",
     "202403110003"
   ],
+  "meetingEmailRecipient": "sheepvs5@gmail.com",
+  "notificationEmailRecipient": "sheepvs5@gmail.com",
   "actions": {
     "collect_docs": {
       "dailyEnabled": false,
@@ -26,6 +28,12 @@
       "monthlyDay": 1
     },
     "process_receipts": {
+      "dailyEnabled": false,
+      "dailyHour": 9,
+      "monthlyEnabled": false,
+      "monthlyDay": 1
+    },
+    "send_meeting_mail": {
       "dailyEnabled": false,
       "dailyHour": 9,
       "monthlyEnabled": false,

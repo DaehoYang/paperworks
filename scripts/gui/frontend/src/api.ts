@@ -76,6 +76,8 @@ export type DashboardData = {
     path: string;
     status: "incomplete" | "ready" | "finished";
     workflowStatus: "no images" | "images found" | "generated" | "uploaded";
+    itemsStatus?: "pending" | "generated" | "failed" | string;
+    itemsError?: string;
     statusLabel: string;
     imageCount: number;
     generated: boolean;

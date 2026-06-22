@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { FileManager } from "@cubone/react-file-manager";
 import "@cubone/react-file-manager/dist/style.css";
@@ -594,10 +594,12 @@ function PurchaseImageHelper({ casePath, onBack }: { casePath: string; onBack: (
   const [data, setData] = useState<PurchaseImageHelperData | null>(null);
   const [pending, setPending] = useState<PendingImage[]>([]);
   const [existingAssignments, setExistingAssignments] = useState<Record<string, number>>({});
+  const [dragActive, setDragActive] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [messageKind, setMessageKind] = useState<"error" | "success">("error");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -618,7 +620,7 @@ function PurchaseImageHelper({ casePath, onBack }: { casePath: string; onBack: (
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const itemCount = data?.itemCount || 1;
+  const itemCount = data?.itemCount || 0;
   const itemOptions = useMemo(() => Array.from({ length: itemCount }, (_value, index) => index + 1), [itemCount]);
   const title = data?.images.length ? "Edit Images" : "Upload Images";
   const existingNumbers = data?.images.map((image) => existingAssignments[image.path] || image.itemNumber || 1) || [];
@@ -630,7 +632,13 @@ function PurchaseImageHelper({ casePath, onBack }: { casePath: string; onBack: (
   );
 
   const addFiles = useCallback((fileList: FileList | File[]) => {
+    if (!itemCount) {
+      setMessageKind("error");
+      setMessage("Wait until item numbers are loaded from the quote.");
+      return;
+    }
     const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || /\.(jpe?g|png|bmp|tiff?)$/i.test(file.name));
+    if (!files.length) return;
     setPending((current) => [
       ...current,
       ...files.map((file, index) => ({
@@ -756,26 +764,55 @@ function PurchaseImageHelper({ casePath, onBack }: { casePath: string; onBack: (
             </button>
 
             <h3>Upload or Replace</h3>
-            <label
-              className="drop-zone"
-              onDragOver={(event) => event.preventDefault()}
+            <div
+              className={`drop-zone ${dragActive ? "active" : ""} ${!itemCount ? "disabled" : ""}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => {
+                if (itemCount) fileInputRef.current?.click();
+              }}
+              onKeyDown={(event) => {
+                if ((event.key === "Enter" || event.key === " ") && itemCount) {
+                  event.preventDefault();
+                  fileInputRef.current?.click();
+                }
+              }}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (itemCount) setDragActive(true);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (itemCount) event.dataTransfer.dropEffect = "copy";
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setDragActive(false);
+              }}
               onDrop={(event) => {
                 event.preventDefault();
+                event.stopPropagation();
+                setDragActive(false);
                 addFiles(event.dataTransfer.files);
               }}
             >
               <input
+                ref={fileInputRef}
                 type="file"
                 multiple
                 accept="image/*,.jpg,.jpeg,.png,.bmp,.tif,.tiff"
+                disabled={!itemCount}
                 onChange={(event) => {
                   if (event.target.files) addFiles(event.target.files);
                   event.currentTarget.value = "";
                 }}
               />
-              <strong>Drop images here</strong>
-              <span>Choosing an occupied item number replaces that image.</span>
-            </label>
+              <strong>{itemCount ? "Drop images here" : loading ? "Loading item numbers..." : "Item numbers unavailable"}</strong>
+              <span>{itemCount ? "Choosing an occupied item number replaces that image." : "Quote parsing must finish before image upload."}</span>
+            </div>
 
             <div className="pending-images">
               {pending.map((item, index) => (

@@ -109,6 +109,23 @@ CREATE TABLE IF NOT EXISTS purchase_documents (
   FOREIGN KEY (purchase_case_id) REFERENCES purchase_cases(id),
   FOREIGN KEY (document_id) REFERENCES documents(id)
 );
+
+CREATE TABLE IF NOT EXISTS purchase_workflow (
+  purchase_case_id INTEGER PRIMARY KEY,
+  items_status TEXT NOT NULL DEFAULT 'pending',
+  items_generated_at TEXT,
+  items_error TEXT,
+  inspection_status TEXT NOT NULL DEFAULT 'pending',
+  inspection_generated_at TEXT,
+  inspection_error TEXT,
+  uploaded INTEGER NOT NULL DEFAULT 0,
+  uploaded_at TEXT,
+  upload_error TEXT,
+  project_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (purchase_case_id) REFERENCES purchase_cases(id)
+);
 """
 
 
@@ -436,6 +453,64 @@ def upsert_purchase_case(conn: sqlite3.Connection, case: dict) -> int:
     row = conn.execute("SELECT id FROM purchase_cases WHERE case_dir=?", (case["case_dir"],)).fetchone()
     conn.commit()
     return int(row["id"])
+
+
+def upsert_purchase_workflow(conn: sqlite3.Connection, purchase_case_id: int, updates: dict[str, object]) -> None:
+    now = utc_now()
+    defaults = {
+        "purchase_case_id": purchase_case_id,
+        "items_status": "pending",
+        "items_generated_at": None,
+        "items_error": None,
+        "inspection_status": "pending",
+        "inspection_generated_at": None,
+        "inspection_error": None,
+        "uploaded": 0,
+        "uploaded_at": None,
+        "upload_error": None,
+        "project_id": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    defaults.update({key: value for key, value in updates.items() if key in defaults})
+    conn.execute(
+        """
+        INSERT INTO purchase_workflow
+        (purchase_case_id, items_status, items_generated_at, items_error,
+         inspection_status, inspection_generated_at, inspection_error,
+         uploaded, uploaded_at, upload_error, project_id, created_at, updated_at)
+        VALUES
+        (:purchase_case_id, :items_status, :items_generated_at, :items_error,
+         :inspection_status, :inspection_generated_at, :inspection_error,
+         :uploaded, :uploaded_at, :upload_error, :project_id, :created_at, :updated_at)
+        ON CONFLICT(purchase_case_id) DO UPDATE SET
+          items_status=COALESCE(excluded.items_status, purchase_workflow.items_status),
+          items_generated_at=COALESCE(excluded.items_generated_at, purchase_workflow.items_generated_at),
+          items_error=excluded.items_error,
+          inspection_status=COALESCE(excluded.inspection_status, purchase_workflow.inspection_status),
+          inspection_generated_at=COALESCE(excluded.inspection_generated_at, purchase_workflow.inspection_generated_at),
+          inspection_error=excluded.inspection_error,
+          uploaded=MAX(excluded.uploaded, purchase_workflow.uploaded),
+          uploaded_at=COALESCE(excluded.uploaded_at, purchase_workflow.uploaded_at),
+          upload_error=COALESCE(excluded.upload_error, purchase_workflow.upload_error),
+          project_id=COALESCE(excluded.project_id, purchase_workflow.project_id),
+          updated_at=excluded.updated_at
+        """,
+        defaults,
+    )
+    conn.commit()
+
+
+def purchase_workflow_for_case_dir(conn: sqlite3.Connection, case_dir: str | Path) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT pw.*
+        FROM purchase_workflow pw
+        JOIN purchase_cases pc ON pc.id=pw.purchase_case_id
+        WHERE pc.case_dir=?
+        """,
+        (str(case_dir),),
+    ).fetchone()
 
 
 def replace_local_purchase_documents(conn: sqlite3.Connection, purchase_case_id: int, docs: dict[str, list[Path]]) -> None:

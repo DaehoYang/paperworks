@@ -29,6 +29,7 @@ from scripts.documents.place_purchase_docs import (
     case_status_from_doc_types,
     copy_vendor_docs_to_purchase,
     fill_existing_card_payment_cases,
+    prepare_purchase_items,
     refresh_vendor_store_from_purchase,
     vendor_metadata,
 )
@@ -454,6 +455,67 @@ class PurchaseScanDbTests(unittest.TestCase):
         self.assertEqual(case_status_from_doc_types({"receipt", "estimate"}), "incomplete")
         self.assertEqual(case_status_from_doc_types({"receipt", "estimate", "statement"}), "finished")
 
+    def test_prepare_purchase_items_records_generated_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "purchase"
+            case = root / "260609_엔티렉스"
+            case.mkdir(parents=True)
+            (case / "전세.pdf").write_bytes(b"tax")
+            (case / "견적.pdf").write_bytes(b"quote")
+            db_path = root / "documents.sqlite3"
+
+            def fake_prepare_items_xls(**kwargs):
+                kwargs["items_path"].write_bytes(b"items")
+                return [], "fake", object()
+
+            with patch("scripts.paperwork.purchase.process_purchase.prepare_items_xls", side_effect=fake_prepare_items_xls):
+                result = prepare_purchase_items(case, db_path)
+
+            self.assertEqual(result, "generated")
+            self.assertTrue((case / "items.xls").exists())
+            conn = connect(db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT pw.items_status, pw.items_error
+                    FROM purchase_workflow pw
+                    JOIN purchase_cases pc ON pc.id=pw.purchase_case_id
+                    WHERE pc.case_dir=?
+                    """,
+                    (str(case),),
+                ).fetchone()
+                self.assertEqual(row["items_status"], "generated")
+                self.assertIsNone(row["items_error"])
+            finally:
+                conn.close()
+
+    def test_prepare_purchase_items_records_pending_without_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "purchase"
+            case = root / "260609_엔티렉스"
+            case.mkdir(parents=True)
+            (case / "전세.pdf").write_bytes(b"tax")
+            db_path = root / "documents.sqlite3"
+
+            result = prepare_purchase_items(case, db_path)
+
+            self.assertEqual(result, "pending:missing_estimate")
+            conn = connect(db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT pw.items_status, pw.items_error
+                    FROM purchase_workflow pw
+                    JOIN purchase_cases pc ON pc.id=pw.purchase_case_id
+                    WHERE pc.case_dir=?
+                    """,
+                    (str(case),),
+                ).fetchone()
+                self.assertEqual(row["items_status"], "pending")
+                self.assertEqual(row["items_error"], "missing_estimate")
+            finally:
+                conn.close()
+
     def test_sqlite_document_and_case_upsert(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "documents.sqlite3"
@@ -495,6 +557,11 @@ class PurchaseScanDbTests(unittest.TestCase):
             replace_local_purchase_documents(conn, case_id, {"estimate": [Path(td) / "견적.pdf"]})
             rows = conn.execute("SELECT doc_type, status FROM purchase_documents").fetchall()
             self.assertEqual([(row["doc_type"], row["status"]) for row in rows], [("estimate", "local")])
+            from scripts.documents.db import upsert_purchase_workflow
+
+            upsert_purchase_workflow(conn, case_id, {"items_status": "generated", "items_generated_at": "2026-06-22T00:00:00+00:00"})
+            workflow = conn.execute("SELECT items_status FROM purchase_workflow WHERE purchase_case_id=?", (case_id,)).fetchone()
+            self.assertEqual(workflow["items_status"], "generated")
             conn.close()
 
     def test_processed_source_uses_message_not_thread_as_skip_key(self) -> None:

@@ -376,6 +376,36 @@ def write_items_xls(items: list[PurchaseItem], xls_path: Path) -> None:
     workbook.save(str(xls_path))
 
 
+def prepare_items_xls(
+    *,
+    quote_pdf: Path,
+    items_path: Path,
+    parse_engine: str = "auto",
+    ocr_api_url: str = DEFAULT_OCR_API_URL,
+    ocr_api_key: str = "",
+    litellm_base_url: str = DEFAULT_LITELLM_BASE_URL,
+    litellm_api_key: str = "",
+    litellm_model: str = "local",
+    codex_bin: str = "codex",
+    codex_model: str | None = None,
+    timeout: int = 180,
+) -> tuple[list[PurchaseItem], str, QuoteTotals]:
+    items, price_mode, totals = parse_quote_items(
+        quote_pdf,
+        parse_engine=parse_engine,
+        ocr_api_url=ocr_api_url,
+        ocr_api_key=ocr_api_key,
+        litellm_base_url=litellm_base_url,
+        litellm_api_key=litellm_api_key,
+        litellm_model=litellm_model,
+        codex_bin=codex_bin,
+        codex_model=codex_model,
+        timeout=timeout,
+    )
+    write_items_xls(items, items_path)
+    return items, price_mode, totals
+
+
 def clean_item_name(item: PurchaseItem) -> str:
     text = item.model or item.name
     text = re.sub(r"[^0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣ.-]", "", str(text))
@@ -599,6 +629,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--form-template", type=Path, default=DEFAULT_FORM_TEMPLATE)
     parser.add_argument("--rebuild-form", action="store_true", help="Rebuild --form-template from --template before processing.")
     parser.add_argument("--items", default="items.xls")
+    parser.add_argument("--items-only", action="store_true", help="Only parse quote and write items.xls; do not require images or generate inspection PDF.")
     parser.add_argument("--images", help="Image folder name. If omitted, imgs, imgs1, then img are tried.")
     parser.add_argument("--output", default="물품검수확인서_작성.pdf")
     parser.add_argument("--projects-yml", type=Path, default=DEFAULT_PROJECTS_YML)
@@ -631,7 +662,7 @@ def main() -> None:
     quote_pdf = purchase_dir / args.quote if args.quote else find_quote_file(purchase_dir)
     template_pdf = purchase_dir / args.template
     items_path = purchase_dir / args.items
-    images_dir = purchase_dir / args.images if args.images else find_images_dir(purchase_dir)
+    images_dir = purchase_dir / args.images if args.images else None
     form_pdf = resolve_template_path(args.form_template)
     output_pdf = purchase_dir / args.output
 
@@ -639,8 +670,9 @@ def main() -> None:
         add_inspection_fields(template_pdf, form_pdf, need_appearances=True)
     if not form_pdf.exists():
         raise FileNotFoundError(f"Missing inspection form template: {form_pdf}")
-    items, price_mode, totals = parse_quote_items(
-        quote_pdf,
+    items, price_mode, totals = prepare_items_xls(
+        quote_pdf=quote_pdf,
+        items_path=items_path,
         parse_engine=args.parse_engine,
         ocr_api_url=args.ocr_api_url,
         ocr_api_key=args.ocr_api_key,
@@ -651,7 +683,15 @@ def main() -> None:
         codex_model=args.codex_model,
         timeout=args.timeout,
     )
-    write_items_xls(items, items_path)
+    if args.items_only:
+        print(f"items: {items_path}")
+        print(f"items_count: {len(items)}")
+        print(f"price_mode: {price_mode}")
+        print(f"quote_totals: supply={totals.supply_price}, vat={totals.vat}, total={totals.total_price}")
+        print(f"normalized_totals: supply={sum(item.supply_price for item in items)}, vat={sum(item.vat for item in items)}, total={sum(item.total_price for item in items)}")
+        return
+
+    images_dir = images_dir or find_images_dir(purchase_dir)
     images = image_paths(images_dir)
     generate_inspection_pdf(form_pdf, output_pdf, items, images, args.inspection_date, inspector)
 

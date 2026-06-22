@@ -145,7 +145,6 @@ def add_label(service, message_id: str, label_id: str) -> None:
 def set_managed_label(service, message_id: str, label_id: str, managed_label_ids: Iterable[str]) -> None:
     managed = set(managed_label_ids)
     remove_label_ids = set(managed - {label_id})
-    remove_label_ids.add("UNREAD")
     service.users().messages().modify(
         userId="me",
         id=message_id,

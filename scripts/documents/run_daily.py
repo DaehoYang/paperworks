@@ -30,6 +30,7 @@ from scripts.documents.place_purchase_docs import (
     load_vendor_docs,
     local_doc_types,
     print_plans,
+    prepare_purchase_items_for_cases,
     refresh_vendor_store_from_purchase,
     sync_db_status,
 )
@@ -169,6 +170,10 @@ def main() -> int:
         print(f"placed: {target}")
         if not args.no_labels:
             mark_finished_case_messages(args, target)
+
+    item_results = prepare_purchase_items_for_cases(args.purchase_root, args.db)
+    for case_dir, result in sorted(item_results.items()):
+        print(f"items-prepare: {result} {case_dir}")
 
     return collect_status
 
