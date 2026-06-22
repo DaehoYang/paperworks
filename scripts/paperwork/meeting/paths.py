@@ -10,6 +10,7 @@ ASSETS_DIR = PACKAGE_DIR / "assets"
 RECEIPT_DIR = BASE_DIR / "receipt"
 USED_RECEIPT_DIR = RECEIPT_DIR / "used"
 OUTPUT_DIR = BASE_DIR / "output"
+MEETING_DB = BASE_DIR / "meeting.sqlite3"
 
 INFO_YML = ASSETS_DIR / "information.yml"
 MINUTES_TEMPLATE_PDF = ASSETS_DIR / "바나연회의록_빈칸.pdf"

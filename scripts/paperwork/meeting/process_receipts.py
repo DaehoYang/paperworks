@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import records, receipt_ocr
+from . import validation
 from .documents import meeting, trip
 from .models import ReceiptRecord
 from .paths import RECORDS_CSV, USED_RECEIPT_DIR
@@ -103,12 +104,21 @@ def route_records(new_records: list[ReceiptRecord], existing: list[ReceiptRecord
             updated[record.file_name] = record
             print(f"review: {record.file_name} ({record.error or record.receipt_type})")
         elif record.receipt_type in MEETING_TYPES:
+            result = validation.validate_meeting_generation_input(record)
+            if not result.ok:
+                reviewed = replace(record, status="review", error=f"pre_generate_validation_failed: {validation.format_errors(result)}")
+                updated[record.file_name] = reviewed
+                print(f"review: {record.file_name} ({reviewed.error})")
+                continue
             if args.dry_run:
                 preview = replace(record, status="would_generate", document_type="meeting")
                 updated[record.file_name] = preview
                 print(f"meeting: {record.file_name} -> dry-run")
             else:
                 generated = meeting.generate(record, list(updated.values()))
+                result = validation.validate_generated_records([generated])
+                if not result.ok:
+                    generated = replace(generated, status="error", error=f"post_generate_validation_failed: {validation.format_errors(result)}")
                 updated[record.file_name] = generated
                 print(f"meeting: {record.file_name} -> {generated.output_pdf}")
         elif record.receipt_type == "transport":
@@ -129,6 +139,13 @@ def route_records(new_records: list[ReceiptRecord], existing: list[ReceiptRecord
             updated[inbound.file_name] = replace(updated[inbound.file_name], status="would_generate", document_type="trip", pair_id=outbound.stem)
             print(f"trip: {outbound.file_name} + {inbound.file_name} -> dry-run")
         else:
+            result = validation.validate_trip_generation_input(updated[outbound.file_name], updated[inbound.file_name])
+            if not result.ok:
+                message = f"pre_generate_validation_failed: {validation.format_errors(result)}"
+                updated[outbound.file_name] = replace(updated[outbound.file_name], status="review", error=message)
+                updated[inbound.file_name] = replace(updated[inbound.file_name], status="review", error=message)
+                print(f"review: {outbound.file_name} + {inbound.file_name} ({message})")
+                continue
             generated_out, generated_in = trip.generate(
                 updated[outbound.file_name],
                 updated[inbound.file_name],
@@ -137,6 +154,11 @@ def route_records(new_records: list[ReceiptRecord], existing: list[ReceiptRecord
                 birthdate=args.birthdate,
                 account=args.account,
             )
+            result = validation.validate_generated_records([generated_out, generated_in])
+            if not result.ok:
+                message = f"post_generate_validation_failed: {validation.format_errors(result)}"
+                generated_out = replace(generated_out, status="error", error=message)
+                generated_in = replace(generated_in, status="error", error=message)
             updated[generated_out.file_name] = generated_out
             updated[generated_in.file_name] = generated_in
             print(f"trip: {generated_out.file_name} + {generated_in.file_name} -> {generated_out.output_pdf}")
@@ -144,18 +166,49 @@ def route_records(new_records: list[ReceiptRecord], existing: list[ReceiptRecord
     return sorted(updated.values(), key=lambda item: (item.generated, item.file_name))
 
 
-def unique_archive_path(path: Path) -> Path:
-    candidate = USED_RECEIPT_DIR / path.name
+def unique_archive_path(path: Path, stem: str | None = None) -> Path:
+    base_stem = stem or path.stem
+    suffix = path.suffix
+    candidate = USED_RECEIPT_DIR / f"{base_stem}{suffix}"
     if not candidate.exists():
         return candidate
     if candidate.resolve() == path.resolve():
         return candidate
-    raise FileExistsError(f"archive already contains {path.name}; rename one of the files first")
+    index = 2
+    while True:
+        candidate = USED_RECEIPT_DIR / f"{base_stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        if candidate.resolve() == path.resolve():
+            return candidate
+        index += 1
 
 
-def archive_processed_receipts(records_to_archive: list[ReceiptRecord]) -> None:
+def archive_stems(records_to_archive: list[ReceiptRecord]) -> dict[str, str]:
+    output_counts: dict[str, int] = {}
+    output_indexes: dict[str, int] = {}
+    for record in records_to_archive:
+        if record.output_pdf:
+            output_counts[record.output_pdf] = output_counts.get(record.output_pdf, 0) + 1
+
+    stems: dict[str, str] = {}
+    for record in records_to_archive:
+        if record.output_pdf:
+            stem = Path(record.output_pdf).stem
+            if output_counts.get(record.output_pdf, 0) > 1:
+                output_indexes[record.output_pdf] = output_indexes.get(record.output_pdf, 0) + 1
+                stem = f"{stem}_{output_indexes[record.output_pdf]}"
+        else:
+            stem = record.receipt_path.stem
+        stems[record.file_name] = stem
+    return stems
+
+
+def archive_processed_receipts(records_to_archive: list[ReceiptRecord]) -> dict[str, Path]:
     USED_RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
+    archived: dict[str, Path] = {}
+    stems = archive_stems(records_to_archive)
     for record in records_to_archive:
         source = record.receipt_path.resolve()
         if source in seen or not source.exists():
@@ -163,9 +216,11 @@ def archive_processed_receipts(records_to_archive: list[ReceiptRecord]) -> None:
         seen.add(source)
         if source.parent.resolve() == USED_RECEIPT_DIR.resolve():
             continue
-        destination = unique_archive_path(source)
+        destination = unique_archive_path(source, stems.get(record.file_name))
         source.rename(destination)
+        archived[record.file_name] = destination
         print(f"archived: {source.name} -> {destination.relative_to(USED_RECEIPT_DIR.parent)}")
+    return archived
 
 
 def main() -> None:
@@ -177,9 +232,15 @@ def main() -> None:
         records.write_records(routed)
         if not args.no_archive_receipts:
             new_names = {record.file_name for record in new_records}
-            archive_processed_receipts(
+            archived_paths = archive_processed_receipts(
                 [record for record in routed if record.file_name in new_names and record.status == "generated"]
             )
+            if archived_paths:
+                routed = [
+                    replace(record, receipt_path=archived_paths.get(record.file_name, record.receipt_path))
+                    for record in routed
+                ]
+                records.write_records(routed)
     new_names = {record.file_name for record in new_records}
     pending = [record for record in routed if record.status == "pending_trip" and record.file_name in new_names]
     if pending and not args.allow_pending_trip:

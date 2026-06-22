@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,8 +28,11 @@ from scripts.documents.classifiers import (
     required_documents_for_doc_types,
 )
 from scripts.documents.purchase_scan import scan_purchase_root
+from scripts.gui.services import automation as automation_services
 from scripts.gui.services import files as file_services
 from scripts.gui.services import jobs as job_services
+from scripts.gui.services import meeting as meeting_services
+from scripts.gui.services import notifications as notification_services
 from scripts.gui.services import paperwork as paperwork_services
 from scripts.gui.services import projects as project_services
 from scripts.gui.services.paths import MEETING_DIR, PURCHASE_DIR, ROOT_DIR, TRASH_DIR, assert_within_root, repo_relative
@@ -48,6 +53,7 @@ BLOCKED_NAMES = {
 }
 BLOCKED_SUFFIXES = {".py", ".sh", ".bash", ".zsh", ".env", ".key", ".pem"}
 ALLOWED_UPLOAD_SUFFIXES = file_services.UPLOAD_EXTENSIONS
+MEETING_INTERNAL_NAMES = {"meeting.sqlite3", "records.csv", "summary.csv"}
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,15 @@ class PurchaseImageAssignment(BaseModel):
 class ReorderPurchaseImagesRequest(BaseModel):
     casePath: str
     assignments: list[PurchaseImageAssignment]
+
+
+class AutomationSettingsRequest(BaseModel):
+    settings: dict[str, object]
+
+
+class PurchaseProjectRequest(BaseModel):
+    casePath: str
+    projectId: str
 
 
 def utc_iso(timestamp: float) -> str:
@@ -157,6 +172,14 @@ def visible_path(path: Path) -> bool:
     if any(part.startswith(".") for part in path.relative_to(ROOT_DIR).parts):
         return False
     if "jobs" in path.parts or "trash" in path.parts:
+        return False
+    try:
+        meeting_rel = path.relative_to(MEETING_DIR)
+    except ValueError:
+        return True
+    if path.name in MEETING_INTERNAL_NAMES:
+        return False
+    if meeting_rel.parts[:2] == ("receipt", "ocr_text") or meeting_rel.parts[:1] == ("ocr_text",):
         return False
     return True
 
@@ -246,6 +269,50 @@ def read_purchase_metadata(case_dir: Path) -> dict[str, object]:
     except (OSError, yaml.YAMLError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def write_purchase_metadata(case_dir: Path, metadata: dict[str, object]) -> None:
+    path = case_dir / ".paperworks.yml"
+    path.write_text(yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def purchase_project_id(case_dir: Path) -> str:
+    metadata = read_purchase_metadata(case_dir)
+    workflow = metadata.get("workflow")
+    if isinstance(workflow, dict):
+        return str(workflow.get("project_id") or workflow.get("projectId") or "")
+    return ""
+
+
+def effective_purchase_project_id(case_dir: Path) -> str:
+    return purchase_project_id(case_dir) or str(automation_services.read_settings().get("defaultProjectId") or "")
+
+
+def set_purchase_project_id(case_dir: Path, project_id: str) -> None:
+    valid_projects = {project.key for project in project_services.load_projects()} | {project.no for project in project_services.load_projects()}
+    if project_id and project_id not in valid_projects:
+        raise HTTPException(status_code=400, detail=f"unknown project id: {project_id}")
+    metadata = read_purchase_metadata(case_dir)
+    workflow = metadata.get("workflow")
+    if not isinstance(workflow, dict):
+        workflow = {}
+    workflow["project_id"] = project_id
+    metadata["workflow"] = workflow
+    write_purchase_metadata(case_dir, metadata)
+
+
+def visible_project_ids() -> set[str]:
+    settings = automation_services.read_settings()
+    raw = settings.get("visibleProjectIds")
+    return {str(value) for value in raw} if isinstance(raw, list) else set()
+
+
+def project_dicts() -> list[dict[str, str]]:
+    visible = visible_project_ids()
+    projects = project_services.load_projects()
+    if visible:
+        projects = [project for project in projects if project.key in visible or project.no in visible]
+    return [project.__dict__ for project in projects]
 
 
 def purchase_uploaded(case_dir: Path) -> bool:
@@ -460,6 +527,174 @@ app.add_middleware(
 )
 
 
+def start_collect_docs_action() -> dict[str, object]:
+    reject_duplicate_action("collect_docs")
+    job = job_services.start_job(
+        "collect_docs",
+        [sys.executable, "-u", "scripts/documents/run_daily.py"],
+        metadata={"target": "purchase"},
+        cwd=ROOT_DIR,
+    )
+    return action_job_response([job])
+
+
+def start_generate_purchase_docs_action() -> dict[str, object]:
+    reject_duplicate_action("generate_purchase_docs")
+    jobs: list[job_services.Job] = []
+    skipped: list[dict[str, str]] = []
+    for case in scan_purchase_root(PURCHASE_DIR):
+        if not case.path.name[:1].isdigit():
+            continue
+        status = purchase_status_from_doc_types(set(case.local_docs))
+        if status not in {"ready", "finished"}:
+            skipped.append({"case": case.name, "reason": f"status={status}"})
+            continue
+        if not has_purchase_images(case.path):
+            skipped.append({"case": case.name, "reason": "missing images"})
+            continue
+        if not needs_purchase_generation(case.path):
+            skipped.append({"case": case.name, "reason": "already generated"})
+            continue
+        jobs.append(
+            job_services.start_job(
+                "generate_purchase_docs",
+                paperwork_services.process_purchase_command(case.path),
+                metadata={"case_dir": repo_relative(case.path), "case_status": status},
+                cwd=ROOT_DIR,
+            )
+        )
+    if not jobs:
+        detail = "No purchase cases need document generation."
+        if skipped:
+            detail += " Checked cases were skipped because they are already generated, missing images, or not ready."
+        raise HTTPException(status_code=409, detail=detail)
+    response = action_job_response(jobs)
+    response["skipped"] = skipped
+    return response
+
+
+def start_upload_purchases_action() -> dict[str, object]:
+    reject_duplicate_action("upload_purchases")
+    grouped: dict[str, list[Path]] = {}
+    skipped: list[dict[str, str]] = []
+    for case in scan_purchase_root(PURCHASE_DIR):
+        if not case.path.name[:1].isdigit():
+            continue
+        doc_status = purchase_status_from_doc_types(set(case.local_docs))
+        if doc_status != "finished":
+            skipped.append({"case": case.name, "reason": f"status={doc_status}"})
+            continue
+        if not purchase_generated(case.path):
+            skipped.append({"case": case.name, "reason": "not generated"})
+            continue
+        if purchase_uploaded(case.path):
+            skipped.append({"case": case.name, "reason": "already uploaded"})
+            continue
+        project_id = effective_purchase_project_id(case.path)
+        if not project_id:
+            skipped.append({"case": case.name, "reason": "missing project"})
+            continue
+        grouped.setdefault(project_id, []).append(case.path)
+    jobs: list[job_services.Job] = []
+    for project_id, case_dirs in grouped.items():
+        jobs.append(
+            job_services.start_job(
+                "upload_purchases",
+                paperwork_services.portal_command(case_dirs, project_id=project_id, step="fill-submit"),
+                metadata={
+                    "case_dirs": [repo_relative(path) for path in case_dirs],
+                    "project_id": project_id,
+                    "step": "fill-submit",
+                },
+                cwd=ROOT_DIR,
+            )
+        )
+    if not jobs:
+        detail = "No purchase cases are ready for upload."
+        if skipped:
+            detail += " Checked cases were skipped because they are uploaded, not finished/generated, or missing project."
+        raise HTTPException(status_code=409, detail=detail)
+    response = action_job_response(jobs)
+    response["skipped"] = skipped
+    return response
+
+
+def start_process_receipts_action() -> dict[str, object]:
+    reject_duplicate_action("process_receipts")
+    receipt_dir = MEETING_DIR / "receipt"
+    receipt_paths: list[Path] = []
+    if receipt_dir.exists() and receipt_dir.is_dir():
+        receipt_paths = [
+            path
+            for path in sorted(receipt_dir.iterdir())
+            if path.is_file() and not path.name.startswith(".") and path.suffix.lower() in {".pdf", *file_services.IMAGE_EXTENSIONS}
+        ]
+    if not receipt_paths:
+        raise HTTPException(status_code=409, detail="No receipt files found in meeting/receipt.")
+    job = job_services.start_job(
+        "process_receipts",
+        paperwork_services.process_receipts_command(receipt_paths),
+        metadata={"count": len(receipt_paths), "target": "meeting/receipt"},
+        cwd=ROOT_DIR,
+    )
+    return action_job_response([job])
+
+
+def start_send_meeting_mail_action() -> dict[str, object]:
+    reject_duplicate_action("send_meeting_mail")
+    settings = automation_services.read_settings()
+    recipient = str(settings.get("meetingEmailRecipient") or "").strip()
+    if not recipient:
+        raise HTTPException(status_code=409, detail="Meeting email recipient is not set.")
+    zip_paths = meeting_services.unsent_output_zips()
+    if not zip_paths:
+        raise HTTPException(status_code=409, detail="No unsent meeting zip files found.")
+    jobs = [
+        job_services.start_job(
+            "send_meeting_mail",
+            paperwork_services.send_meeting_mail_command(zip_path, recipient),
+            metadata={"attachment": repo_relative(zip_path), "recipient": recipient},
+            cwd=ROOT_DIR,
+        )
+        for zip_path in zip_paths
+    ]
+    return action_job_response(jobs)
+
+
+AUTOMATION_ACTIONS = {
+    "collect_docs": start_collect_docs_action,
+    "generate_purchase_docs": start_generate_purchase_docs_action,
+    "upload_purchases": start_upload_purchases_action,
+    "process_receipts": start_process_receipts_action,
+    "send_meeting_mail": start_send_meeting_mail_action,
+}
+
+
+def run_automation_scheduler() -> None:
+    while True:
+        for action, schedule, key in automation_services.due_actions():
+            token = job_services.AUTOMATION_CONTEXT.set({"action": action, "schedule": schedule, "key": key})
+            try:
+                result = AUTOMATION_ACTIONS[action]()
+                automation_services.record_run(action, schedule, key, ok=True, detail=json.dumps(result, ensure_ascii=False))
+            except Exception as exc:
+                detail = str(exc)
+                automation_services.record_run(action, schedule, key, ok=False, detail=detail)
+                try:
+                    notification_services.send_automation_failure(action=action, schedule=schedule, key=key, detail=detail)
+                except Exception:
+                    pass
+            finally:
+                job_services.AUTOMATION_CONTEXT.reset(token)
+        time.sleep(60)
+
+
+@app.on_event("startup")
+def start_automation_scheduler() -> None:
+    thread = threading.Thread(target=run_automation_scheduler, name="paperworks-automation", daemon=True)
+    thread.start()
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -490,6 +725,8 @@ def dashboard() -> dict[str, object]:
             for doc_type in required_doc_types
         }
         workflow = purchase_workflow_label(status, case.path)
+        project_id = purchase_project_id(case.path)
+        effective_project_id = effective_purchase_project_id(case.path)
         infos = file_services.list_files(case.path, recursive=True)
         purchase_cases.append(
             {
@@ -501,13 +738,12 @@ def dashboard() -> dict[str, object]:
                 "required": required,
                 "fileCount": len(infos),
                 "updatedAt": utc_iso(case.path.stat().st_mtime),
+                "projectId": project_id,
+                "effectiveProjectId": effective_project_id,
             }
         )
 
-    receipt_dir = MEETING_DIR / "receipt"
-    output_dir = MEETING_DIR / "output"
-    receipts = file_services.list_files(receipt_dir, recursive=False) if receipt_dir.exists() else []
-    outputs = file_services.list_files(output_dir, recursive=False) if output_dir.exists() else []
+    meeting_status = {**meeting_services.status_summary(), "items": meeting_services.meeting_items()}
 
     recent_jobs = []
     for job in job_services.list_jobs(limit=12):
@@ -524,14 +760,9 @@ def dashboard() -> dict[str, object]:
         )
 
     return {
-        "projects": [project.__dict__ for project in project_services.load_projects()],
+        "projects": project_dicts(),
         "purchaseCases": purchase_cases,
-        "meeting": {
-            "receiptCount": len(receipts),
-            "outputCount": len(outputs),
-            "recordsCsv": (receipt_dir / "records.csv").exists(),
-            "summaryCsv": (receipt_dir / "summary.csv").exists(),
-        },
+        "meeting": meeting_status,
         "jobs": recent_jobs,
     }
 
@@ -581,79 +812,51 @@ def get_job_stderr(job_id: str) -> dict[str, str]:
     return {"text": job_services.read_log(job, "stderr.log")}
 
 
+@app.get("/api/automation-settings")
+def get_automation_settings() -> dict[str, object]:
+    return {"settings": automation_services.read_settings()}
+
+
+@app.post("/api/automation-settings")
+def update_automation_settings(request: AutomationSettingsRequest) -> dict[str, object]:
+    return {"settings": automation_services.write_settings(request.settings)}
+
+
+@app.get("/api/projects")
+def get_projects() -> dict[str, object]:
+    return {"projects": [project.__dict__ for project in project_services.load_projects()]}
+
+
+@app.post("/api/purchase-project")
+def update_purchase_project(request: PurchaseProjectRequest) -> dict[str, object]:
+    case_dir = resolve_purchase_case_path(request.casePath)
+    set_purchase_project_id(case_dir, request.projectId)
+    return {"casePath": api_path(case_dir), "projectId": request.projectId}
+
+
 @app.post("/api/actions/collect_docs")
 def collect_docs() -> dict[str, object]:
-    reject_duplicate_action("collect_docs")
-    job = job_services.start_job(
-        "collect_docs",
-        [sys.executable, "-u", "scripts/documents/run_daily.py"],
-        metadata={"target": "purchase"},
-        cwd=ROOT_DIR,
-    )
-    return action_job_response([job])
+    return start_collect_docs_action()
 
 
 @app.post("/api/actions/generate_purchase_docs")
 def generate_purchase_docs() -> dict[str, object]:
-    reject_duplicate_action("generate_purchase_docs")
-    jobs: list[job_services.Job] = []
-    skipped: list[dict[str, str]] = []
-    for case in scan_purchase_root(PURCHASE_DIR):
-        if not case.path.name[:1].isdigit():
-            continue
-        status = purchase_status_from_doc_types(set(case.local_docs))
-        if status not in {"ready", "finished"}:
-            skipped.append({"case": case.name, "reason": f"status={status}"})
-            continue
-        if not has_purchase_images(case.path):
-            skipped.append({"case": case.name, "reason": "missing images"})
-            continue
-        if not needs_purchase_generation(case.path):
-            skipped.append({"case": case.name, "reason": "already generated"})
-            continue
-        jobs.append(
-            job_services.start_job(
-                "generate_purchase_docs",
-                paperwork_services.process_purchase_command(case.path),
-                metadata={"case_dir": repo_relative(case.path), "case_status": status},
-                cwd=ROOT_DIR,
-            )
-        )
-    if not jobs:
-        detail = "No purchase cases need document generation."
-        if skipped:
-            detail += " Checked cases were skipped because they are already generated, missing images, or not ready."
-        raise HTTPException(status_code=409, detail=detail)
-    response = action_job_response(jobs)
-    response["skipped"] = skipped
-    return response
+    return start_generate_purchase_docs_action()
 
 
 @app.post("/api/actions/upload_purchases")
 def upload_purchases() -> dict[str, object]:
-    raise HTTPException(status_code=409, detail="Upload Purchases requires project selection and confirmation UI before portal upload.")
+    return start_upload_purchases_action()
 
 
 @app.post("/api/actions/process_receipts")
 def process_receipts() -> dict[str, object]:
-    reject_duplicate_action("process_receipts")
-    receipt_dir = MEETING_DIR / "receipt"
-    receipt_paths: list[Path] = []
-    if receipt_dir.exists() and receipt_dir.is_dir():
-        receipt_paths = [
-            path
-            for path in sorted(receipt_dir.iterdir())
-            if path.is_file() and not path.name.startswith(".") and path.suffix.lower() in {".pdf", *file_services.IMAGE_EXTENSIONS}
-        ]
-    if not receipt_paths:
-        raise HTTPException(status_code=409, detail="No receipt files found in meeting/receipt.")
-    job = job_services.start_job(
-        "process_receipts",
-        paperwork_services.process_receipts_command(receipt_paths),
-        metadata={"count": len(receipt_paths), "target": "meeting/receipt"},
-        cwd=ROOT_DIR,
-    )
-    return action_job_response([job])
+    return start_process_receipts_action()
+
+
+@app.post("/api/actions/send_meeting_mail")
+def send_meeting_mail() -> dict[str, object]:
+    return start_send_meeting_mail_action()
 
 
 @app.get("/api/purchase-image-helper")

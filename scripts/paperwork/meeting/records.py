@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+from . import db
 from .models import ReceiptRecord
 from .paths import RECORDS_CSV, RECEIPT_DIR, SUMMARY_CSV, USED_RECEIPT_DIR
 
@@ -134,6 +135,8 @@ def row_to_record(row: dict[str, str]) -> ReceiptRecord:
 
 
 def read_records(path: Path = RECORDS_CSV) -> list[ReceiptRecord]:
+    if path == RECORDS_CSV and db.has_receipts():
+        return db.load_records()
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -141,6 +144,8 @@ def read_records(path: Path = RECORDS_CSV) -> list[ReceiptRecord]:
 
 
 def write_records(records: list[ReceiptRecord], path: Path = RECORDS_CSV) -> None:
+    if path == RECORDS_CSV:
+        db.sync_records(records)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=LEDGER_HEADER, extrasaction="ignore")

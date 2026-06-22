@@ -67,8 +67,10 @@ export function downloadUrl(path: string): string {
   return `api/download?path=${encodeURIComponent(path)}`;
 }
 
+export type ProjectInfo = { key: string; no: string; name: string; start_date?: string; end_date?: string };
+
 export type DashboardData = {
-  projects: Array<{ key: string; no: string; name: string }>;
+  projects: ProjectInfo[];
   purchaseCases: Array<{
     name: string;
     path: string;
@@ -82,8 +84,27 @@ export type DashboardData = {
     required: Record<string, string[]>;
     fileCount: number;
     updatedAt: string;
+    projectId?: string;
+    effectiveProjectId?: string;
   }>;
-  meeting: { receiptCount: number; outputCount: number; recordsCsv: boolean; summaryCsv: boolean };
+  meeting: {
+    pendingReceiptCount?: number;
+    readyToEmailCount?: number;
+    emailedCount?: number;
+    outputCount?: number;
+    receiptCount?: number;
+    recordsCsv?: boolean;
+    summaryCsv?: boolean;
+    items?: Array<{
+      name: string;
+      path: string;
+      status: "unprocessed" | "processed" | "email-sent";
+      statusLabel: string;
+      kind: string;
+      detail?: string;
+      updatedAt?: string;
+    }>;
+  };
   jobs: Array<{ id: string; kind?: string; state?: string; returncode?: number | null; createdAt?: string; finishedAt?: string; errorSummary?: string }>;
 };
 
@@ -91,7 +112,26 @@ export async function loadDashboard(): Promise<DashboardData> {
   return requestJson<DashboardData>("api/dashboard");
 }
 
-export type ActionName = "collect_docs" | "generate_purchase_docs" | "upload_purchases" | "process_receipts";
+export type AutomationActionName = "collect_docs" | "generate_purchase_docs" | "upload_purchases" | "process_receipts" | "send_meeting_mail";
+
+export type ActionName = AutomationActionName;
+
+export type AutomationActionSettings = {
+  dailyEnabled: boolean;
+  dailyHour: number;
+  monthlyEnabled: boolean;
+  monthlyDay: number;
+};
+
+export type AutomationSettings = {
+  timezone: string;
+  monthlyHour: number;
+  defaultProjectId: string;
+  visibleProjectIds: string[];
+  meetingEmailRecipient: string;
+  notificationEmailRecipient: string;
+  actions: Record<AutomationActionName, AutomationActionSettings>;
+};
 
 export type JobSummary = {
   id: string;
@@ -123,6 +163,33 @@ export async function loadJobs(): Promise<JobSummary[]> {
 export async function loadJobLog(jobId: string, stream: "stdout" | "stderr"): Promise<string> {
   const data = await requestJson<{ text: string }>(`api/jobs/${encodeURIComponent(jobId)}/${stream}`);
   return data.text;
+}
+
+export async function loadAutomationSettings(): Promise<AutomationSettings> {
+  const data = await requestJson<{ settings: AutomationSettings }>("api/automation-settings");
+  return data.settings;
+}
+
+export async function saveAutomationSettings(settings: AutomationSettings): Promise<AutomationSettings> {
+  const data = await requestJson<{ settings: AutomationSettings }>("api/automation-settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings }),
+  });
+  return data.settings;
+}
+
+export async function loadProjects(): Promise<ProjectInfo[]> {
+  const data = await requestJson<{ projects: ProjectInfo[] }>("api/projects");
+  return data.projects;
+}
+
+export async function updatePurchaseProject(casePath: string, projectId: string): Promise<{ casePath: string; projectId: string }> {
+  return requestJson<{ casePath: string; projectId: string }>("api/purchase-project", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ casePath, projectId }),
+  });
 }
 
 

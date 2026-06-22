@@ -1,0 +1,35 @@
+{
+  "timezone": "UTC",
+  "monthlyHour": 0,
+  "defaultProjectId": "202403110003",
+  "visibleProjectIds": [
+    "202601800001",
+    "202403110003"
+  ],
+  "actions": {
+    "collect_docs": {
+      "dailyEnabled": false,
+      "dailyHour": 9,
+      "monthlyEnabled": false,
+      "monthlyDay": 1
+    },
+    "generate_purchase_docs": {
+      "dailyEnabled": false,
+      "dailyHour": 9,
+      "monthlyEnabled": false,
+      "monthlyDay": 1
+    },
+    "upload_purchases": {
+      "dailyEnabled": false,
+      "dailyHour": 9,
+      "monthlyEnabled": false,
+      "monthlyDay": 1
+    },
+    "process_receipts": {
+      "dailyEnabled": false,
+      "dailyHour": 9,
+      "monthlyEnabled": false,
+      "monthlyDay": 1
+    }
+  }
+}

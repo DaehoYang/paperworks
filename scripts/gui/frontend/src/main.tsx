@@ -5,6 +5,8 @@ import "@cubone/react-file-manager/dist/style.css";
 import "./styles.css";
 import {
   ActionName,
+  AutomationActionName,
+  AutomationSettings,
   DashboardData,
   FileItem,
   JobSummary,
@@ -18,16 +20,20 @@ import {
   loadJobs,
   loadPurchaseImageHelper,
   loadDashboard,
+  loadAutomationSettings,
+  loadProjects,
   movePaths,
   previewUrl,
   renamePath,
   reorderPurchaseImages,
+  saveAutomationSettings,
   startAction,
+  updatePurchaseProject,
   uploadPurchaseImages,
 } from "./api";
 
 type ManagerFile = FileItem;
-type View = "dashboard" | "files" | "jobs" | "images";
+type View = "dashboard" | "files" | "jobs" | "images" | "settings";
 
 function Preview({ file }: { file: ManagerFile }) {
   if (!file || file.isDirectory) return null;
@@ -68,12 +74,15 @@ function Dashboard({
   data,
   onOpenFiles,
   onOpenImageHelper,
+  onRefresh,
 }: {
   data: DashboardData | null;
   onOpenFiles: (path?: string) => void;
   onOpenImageHelper: (path: string) => void;
+  onRefresh: () => Promise<void>;
 }) {
   const [showAllPurchases, setShowAllPurchases] = useState(false);
+  const [showAllMeeting, setShowAllMeeting] = useState(false);
   if (!data) {
     return <div className="panel empty-panel">Loading dashboard...</div>;
   }
@@ -82,6 +91,11 @@ function Dashboard({
   const finishedCases = data.purchaseCases.filter((item) => item.status === "finished");
   const openCases = data.purchaseCases.filter((item) => !item.uploaded);
   const visiblePurchaseCases = showAllPurchases ? data.purchaseCases : openCases;
+  const meetingPending = data.meeting.pendingReceiptCount ?? data.meeting.receiptCount ?? 0;
+  const meetingProcessed = data.meeting.readyToEmailCount ?? data.meeting.outputCount ?? 0;
+  const meetingEmailed = data.meeting.emailedCount ?? 0;
+  const meetingItems = data.meeting.items || [];
+  const visibleMeetingItems = showAllMeeting ? meetingItems : meetingItems.filter((item) => item.status !== "email-sent");
   return (
     <section className="dashboard">
       <div className="metric-grid">
@@ -90,8 +104,9 @@ function Dashboard({
         <div className="metric warn"><span>Incomplete</span><strong>{incompleteCases.length}</strong></div>
         <div className="metric"><span>Ready</span><strong>{readyCases.length}</strong></div>
         <div className="metric"><span>Finished</span><strong>{finishedCases.length}</strong></div>
-        <div className="metric"><span>Meeting receipts</span><strong>{data.meeting.receiptCount}</strong></div>
-        <div className="metric"><span>Meeting outputs</span><strong>{data.meeting.outputCount}</strong></div>
+        <div className="metric warn"><span>Unprocessed</span><strong>{meetingPending}</strong></div>
+        <div className="metric"><span>Processed</span><strong>{meetingProcessed}</strong></div>
+        <div className="metric"><span>Email sent</span><strong>{meetingEmailed}</strong></div>
       </div>
 
       <div className="dashboard-grid">
@@ -109,14 +124,32 @@ function Dashboard({
           <div className="case-list">
             {visiblePurchaseCases.map((item) => {
               const imageActionLabel = item.uploaded ? null : item.workflowStatus === "no images" ? "Upload Images" : "Edit Images";
+              const canSelectProject = !item.uploaded;
               return (
                 <div className="case-row" key={item.path} onClick={() => onOpenFiles(item.path)} role="button" tabIndex={0}>
                   <div>
                     <strong>{item.name}</strong>
                     <span>{item.fileCount} files · {fmtDate(item.updatedAt)}</span>
                     {item.missing.length ? <span>missing: {item.missing.join(", ")}</span> : null}
+                    {item.effectiveProjectId ? <span>project: {item.effectiveProjectId}</span> : <span>project: not set</span>}
                   </div>
                   <div className="case-row-actions">
+                    {canSelectProject ? (
+                      <select
+                        className="row-select"
+                        value={item.projectId || ""}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={(event) => {
+                          event.stopPropagation();
+                          void updatePurchaseProject(item.path, event.target.value).then(() => onRefresh());
+                        }}
+                      >
+                        <option value="">Default</option>
+                        {data.projects.map((project) => (
+                          <option value={project.key} key={project.key}>{project.no} - {project.name}</option>
+                        ))}
+                      </select>
+                    ) : null}
                     <em className={`badge ${item.status} ${item.workflowStatus.replace(/\s+/g, "-")}`}>
                       {item.statusLabel}
                     </em>
@@ -139,11 +172,30 @@ function Dashboard({
         </div>
 
         <div className="panel">
-          <div className="panel-header"><h2>Meeting</h2><button onClick={() => onOpenFiles('/meeting')}>Open meeting</button></div>
-          <div className="kv"><span>Receipt files</span><strong>{data.meeting.receiptCount}</strong></div>
-          <div className="kv"><span>Output PDFs</span><strong>{data.meeting.outputCount}</strong></div>
-          <div className="kv"><span>records.csv</span><strong>{data.meeting.recordsCsv ? 'yes' : 'no'}</strong></div>
-          <div className="kv"><span>summary.csv</span><strong>{data.meeting.summaryCsv ? 'yes' : 'no'}</strong></div>
+          <div className="panel-header">
+            <h2>Meeting</h2>
+            <div className="panel-actions">
+              <button onClick={() => setShowAllMeeting((value) => !value)}>
+                {showAllMeeting ? "Open only" : "Show All"}
+              </button>
+              <button onClick={() => onOpenFiles('/meeting')}>Open meeting</button>
+            </div>
+          </div>
+          <div className="case-list meeting-list">
+            {visibleMeetingItems.length === 0 ? <p className="muted">No open meeting items.</p> : null}
+            {visibleMeetingItems.map((item) => {
+              const detail = item.detail && item.detail.includes("T") ? fmtDate(item.detail) : item.detail;
+              return (
+                <div className="case-row" key={`${item.status}-${item.path}`} onClick={() => onOpenFiles(item.path)} role="button" tabIndex={0}>
+                  <div>
+                    <strong>{item.name}</strong>
+                    <span>{item.kind}{detail ? ` · ${detail}` : ""}</span>
+                  </div>
+                  <em className={`badge ${item.status}`}>{item.statusLabel}</em>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         <div className="panel">
@@ -311,6 +363,218 @@ function JobsView() {
             )}
           </div>
         </div>
+      </div>
+    </section>
+  );
+}
+
+const AUTOMATION_ACTIONS: Array<{ key: AutomationActionName; label: string }> = [
+  { key: "collect_docs", label: "Collect Docs" },
+  { key: "generate_purchase_docs", label: "Generate Purchase Docs" },
+  { key: "upload_purchases", label: "Upload Purchases" },
+  { key: "process_receipts", label: "Process Receipts" },
+  { key: "send_meeting_mail", label: "Send mail" },
+];
+
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_value, index) => index);
+const DAY_OPTIONS = Array.from({ length: 28 }, (_value, index) => index + 1);
+
+function SettingsView() {
+  const [settings, setSettings] = useState<AutomationSettings | null>(null);
+  const [projects, setProjects] = useState<DashboardData["projects"]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [messageKind, setMessageKind] = useState<"error" | "success">("error");
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [nextSettings, allProjects] = await Promise.all([loadAutomationSettings(), loadProjects()]);
+      setSettings(nextSettings);
+      setProjects(allProjects);
+      setMessage("");
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const updateAction = (action: AutomationActionName, patch: Partial<AutomationSettings["actions"][AutomationActionName]>) => {
+    setSettings((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        actions: {
+          ...current.actions,
+          [action]: {
+            ...current.actions[action],
+            ...patch,
+          },
+        },
+      };
+    });
+  };
+
+  const save = async () => {
+    if (!settings) return;
+    setSaving(true);
+    try {
+      setSettings(await saveAutomationSettings(settings));
+      setMessageKind("success");
+      setMessage("Automation settings saved.");
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const visibleProjectIds = new Set(settings?.visibleProjectIds || []);
+  const displayedProjects = projects.filter((project) => !visibleProjectIds.size || visibleProjectIds.has(project.key));
+  const projectOptionLabel = (project: DashboardData["projects"][number]) => {
+    const dates = project.start_date || project.end_date ? ` (${project.start_date || "?"} - ${project.end_date || "?"})` : "";
+    return `${project.no} - ${project.name}${dates}`;
+  };
+
+  const toggleVisibleProject = (projectKey: string, checked: boolean) => {
+    setSettings((current) => {
+      if (!current) return current;
+      const existing = new Set(
+        current.visibleProjectIds?.length ? current.visibleProjectIds : projects.map((project) => project.key),
+      );
+      if (checked) existing.add(projectKey);
+      else existing.delete(projectKey);
+      const nextVisible = Array.from(existing);
+      const defaultProjectId = current.defaultProjectId && nextVisible.length && !existing.has(current.defaultProjectId) ? "" : current.defaultProjectId;
+      return { ...current, visibleProjectIds: nextVisible, defaultProjectId };
+    });
+  };
+
+  return (
+    <section className="settings-view">
+      {message && <div className={messageKind === "success" ? "success-banner" : "error-banner"}>{message}</div>}
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Automation Settings</h2>
+            <p className="muted">Daily schedules run on the selected UTC hour. Monthly schedules run at 00:00 UTC on the selected day.</p>
+          </div>
+          <div className="panel-actions">
+            <button onClick={() => void refresh()} disabled={loading}>Refresh</button>
+            <button onClick={() => void save()} disabled={!settings || saving}>Save</button>
+          </div>
+        </div>
+        {!settings ? <p className="muted">Loading settings...</p> : null}
+        {settings ? (
+          <>
+          <div className="settings-default">
+            <label>
+              <span>Default project</span>
+              <select
+                value={settings.defaultProjectId || ""}
+                onChange={(event) => setSettings((current) => current ? { ...current, defaultProjectId: event.target.value } : current)}
+              >
+                <option value="">Not set</option>
+                {displayedProjects.map((project) => (
+                  <option value={project.key} key={project.key}>{projectOptionLabel(project)}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Meeting email recipient</span>
+              <input
+                type="email"
+                value={settings.meetingEmailRecipient || ""}
+                onChange={(event) => setSettings((current) => current ? { ...current, meetingEmailRecipient: event.target.value } : current)}
+              />
+            </label>
+            <label>
+              <span>Notification email</span>
+              <input
+                type="email"
+                value={settings.notificationEmailRecipient || ""}
+                onChange={(event) => setSettings((current) => current ? { ...current, notificationEmailRecipient: event.target.value } : current)}
+              />
+            </label>
+          </div>
+          <div className="settings-projects">
+            <div className="settings-projects-header">
+              <strong>Visible projects</strong>
+              <span className="muted">Unchecked projects are hidden from purchase project selectors. If none are checked, all projects are shown.</span>
+            </div>
+            <div className="project-check-list">
+              {projects.map((project) => {
+                const checked = !visibleProjectIds.size || visibleProjectIds.has(project.key);
+                return (
+                  <label className="project-check-row" key={project.key}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(event) => toggleVisibleProject(project.key, event.target.checked)}
+                    />
+                    <span>
+                      <strong>{project.no}</strong>
+                      <em>{project.name}</em>
+                      {(project.start_date || project.end_date) ? <small>{project.start_date || "?"} - {project.end_date || "?"}</small> : <small>No date range</small>}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          <div className="settings-table">
+            <div className="settings-row settings-head">
+              <span>Action</span>
+              <span>Daily</span>
+              <span>Hour</span>
+              <span>Monthly</span>
+              <span>Day</span>
+            </div>
+            {AUTOMATION_ACTIONS.map((action) => {
+              const config = settings.actions[action.key];
+              return (
+                <div className="settings-row" key={action.key}>
+                  <strong>{action.label}</strong>
+                  <label className="check-cell">
+                    <input
+                      type="checkbox"
+                      checked={config.dailyEnabled}
+                      onChange={(event) => updateAction(action.key, { dailyEnabled: event.target.checked })}
+                    />
+                  </label>
+                  <select
+                    value={config.dailyHour}
+                    disabled={!config.dailyEnabled}
+                    onChange={(event) => updateAction(action.key, { dailyHour: Number(event.target.value) })}
+                  >
+                    {HOUR_OPTIONS.map((hour) => <option value={hour} key={hour}>{hour.toString().padStart(2, "0")}:00</option>)}
+                  </select>
+                  <label className="check-cell">
+                    <input
+                      type="checkbox"
+                      checked={config.monthlyEnabled}
+                      onChange={(event) => updateAction(action.key, { monthlyEnabled: event.target.checked })}
+                    />
+                  </label>
+                  <select
+                    value={config.monthlyDay}
+                    disabled={!config.monthlyEnabled}
+                    onChange={(event) => updateAction(action.key, { monthlyDay: Number(event.target.value) })}
+                  >
+                    {DAY_OPTIONS.map((day) => <option value={day} key={day}>Day {day}</option>)}
+                  </select>
+                </div>
+              );
+            })}
+          </div>
+          </>
+        ) : null}
       </div>
     </section>
   );
@@ -614,9 +878,10 @@ function App() {
   };
 
   const renderCurrentView = () => {
-    if (view === "dashboard") return <Dashboard data={dashboard} onOpenFiles={openFiles} onOpenImageHelper={openImageHelper} />;
+    if (view === "dashboard") return <Dashboard data={dashboard} onOpenFiles={openFiles} onOpenImageHelper={openImageHelper} onRefresh={refreshDashboard} />;
     if (view === "files") return <FileBrowser initialPath={browserPath} />;
     if (view === "images") return <PurchaseImageHelper casePath={imageHelperPath} onBack={() => setView("dashboard")} />;
+    if (view === "settings") return <SettingsView />;
     return <JobsView />;
   };
 
@@ -633,6 +898,7 @@ function App() {
           <button className={view === "dashboard" ? "active" : ""} onClick={() => setView("dashboard")}>Dashboard</button>
           <button className={view === "files" ? "active" : ""} onClick={() => setView("files")}>File Browser</button>
           <button onClick={() => void refreshDashboard()}>Refresh</button>
+          <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>Settings</button>
         </nav>
       </header>
       <div className="action-bar">
@@ -640,6 +906,7 @@ function App() {
         <button className={isActionBusy("generate_purchase_docs") ? "running" : ""} disabled={isActionBusy("generate_purchase_docs")} onClick={() => void runAction("generate_purchase_docs", "Generate Purchase Docs")}>Generate Purchase Docs</button>
         <button className={isActionBusy("upload_purchases") ? "running" : ""} disabled={isActionBusy("upload_purchases")} onClick={() => void runAction("upload_purchases", "Upload Purchases")}>Upload Purchases</button>
         <button className={isActionBusy("process_receipts") ? "running" : ""} disabled={isActionBusy("process_receipts")} onClick={() => void runAction("process_receipts", "Process Receipts")}>Process Receipts</button>
+        <button className={isActionBusy("send_meeting_mail") ? "running" : ""} disabled={isActionBusy("send_meeting_mail")} onClick={() => void runAction("send_meeting_mail", "Send mail")}>Send mail</button>
         <button onClick={() => setView("jobs")}>Jobs</button>
       </div>
       {message && <div className={messageKind === "success" ? "success-banner" : "error-banner"}>{message}</div>}

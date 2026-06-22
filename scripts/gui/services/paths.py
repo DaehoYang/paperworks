@@ -11,6 +11,8 @@ PURCHASE_DIR = ROOT_DIR / "purchase"
 PROJECTS_YML = ROOT_DIR / "projects.yml"
 JOBS_DIR = GUI_DIR / "jobs"
 TRASH_DIR = GUI_DIR / "trash"
+AUTOMATION_SETTINGS = GUI_DIR / "automation_settings.json"
+AUTOMATION_STATE = GUI_DIR / "automation_state.json"
 
 
 def ensure_gui_dirs() -> None:

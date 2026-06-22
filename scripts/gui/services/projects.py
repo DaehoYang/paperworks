@@ -13,10 +13,13 @@ class Project:
     key: str
     no: str
     name: str
+    start_date: str = ""
+    end_date: str = ""
 
     @property
     def label(self) -> str:
-        return f"{self.no} - {self.name}"
+        dates = f" ({self.start_date} - {self.end_date})" if self.start_date or self.end_date else ""
+        return f"{self.no} - {self.name}{dates}"
 
 
 def load_projects(path: Path = PROJECTS_YML) -> list[Project]:
@@ -32,7 +35,9 @@ def load_projects(path: Path = PROJECTS_YML) -> list[Project]:
             continue
         no = str(value.get("no") or key)
         name = str(value.get("name") or "")
-        projects.append(Project(key=str(key), no=no, name=name))
+        start_date = str(value.get("start_date") or value.get("start") or value.get("period_start") or "")
+        end_date = str(value.get("end_date") or value.get("end") or value.get("period_end") or "")
+        projects.append(Project(key=str(key), no=no, name=name, start_date=start_date, end_date=end_date))
     return sorted(projects, key=lambda item: item.no)
 
 

@@ -82,7 +82,10 @@ def list_purchase_cases() -> list[Path]:
 
 
 def should_hide_path(path: Path) -> bool:
-    hidden_names = {"__pycache__", ".git", ".trash", "jobs", "trash"}
+    hidden_names = {"__pycache__", ".git", ".trash", "jobs", "trash", "ocr_text"}
+    internal_names = {"meeting.sqlite3", "records.csv", "summary.csv"}
+    if path.name in internal_names:
+        return True
     return any(part.startswith(".") or part in hidden_names for part in path.parts)
 
 

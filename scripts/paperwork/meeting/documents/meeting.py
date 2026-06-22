@@ -119,7 +119,7 @@ def meeting_time_text(receipt_time: datetime) -> str:
     return f"{start:%Y년 %m월 %d일 %H:%M} ~ {end:%Y년 %m월 %d일 %H:%M}"
 
 
-def meeting_output_pdf(record: ReceiptRecord, existing: list[ReceiptRecord]) -> Path:
+def meeting_output_zip(record: ReceiptRecord, existing: list[ReceiptRecord]) -> Path:
     start, _end = meeting_time_range(record.generated)
     base_name = f"{start:%y%m%d_%H%M}_회의록"
     used = {
@@ -127,12 +127,12 @@ def meeting_output_pdf(record: ReceiptRecord, existing: list[ReceiptRecord]) -> 
         for item in existing
         if item.file_name != record.file_name and item.output_pdf
     }
-    candidate = OUTPUT_DIR / f"{base_name}.pdf"
+    candidate = OUTPUT_DIR / f"{base_name}.zip"
     if candidate not in used:
         return candidate
     index = 2
     while True:
-        candidate = OUTPUT_DIR / f"{base_name}_{index}.pdf"
+        candidate = OUTPUT_DIR / f"{base_name}_{index}.zip"
         if candidate not in used:
             return candidate
         index += 1
@@ -174,18 +174,18 @@ def generate(record: ReceiptRecord, existing: list[ReceiptRecord]) -> ReceiptRec
     count = config.attendee_count(record.total_price, record.item_count, record.food_count, record.drink_count, record.store_name)
     attendees = select_attendees(record, count, meeting_place)
     count = len(attendees)
-    combined_pdf = meeting_output_pdf(record, existing)
+    output_zip = meeting_output_zip(record, existing)
     legacy_minutes_pdf = OUTPUT_DIR / f"{record.stem}_바나연회의록.pdf"
     legacy_combined_pdf = OUTPUT_DIR / f"{record.stem}_바나연회의록_영수증첨부.pdf"
     with NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
         minutes_pdf = Path(handle.name)
     try:
         make_minutes_pdf(record, topic, attendees, meeting_place, minutes_pdf)
-        pdf_utils.combine_pdfs_and_receipts(minutes_pdf, [record.receipt_path], combined_pdf)
+        pdf_utils.write_document_receipt_zip(minutes_pdf, [record.receipt_path], output_zip, "회의록.pdf")
     finally:
         minutes_pdf.unlink(missing_ok=True)
         legacy_minutes_pdf.unlink(missing_ok=True)
-        if legacy_combined_pdf != combined_pdf:
+        if legacy_combined_pdf != output_zip:
             legacy_combined_pdf.unlink(missing_ok=True)
     records.update_summary(record, meeting_place, topic, count, ";".join(member.name for member in attendees))
-    return replace(record, status="generated", document_type=topic, output_pdf=str(combined_pdf.relative_to(OUTPUT_DIR.parents[0])))
+    return replace(record, status="generated", document_type=topic, output_pdf=str(output_zip.relative_to(OUTPUT_DIR.parents[0])))

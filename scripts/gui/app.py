@@ -12,7 +12,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from scripts.gui.services import codex_repair, files, jobs, paperwork, projects
+from scripts.gui.services import codex_repair, files, jobs, meeting as meeting_services, paperwork, projects
 from scripts.gui.services.paths import MEETING_DIR, PROJECTS_YML, PURCHASE_DIR, ROOT_DIR, ensure_gui_dirs, resolve_repo_path
 
 
@@ -491,22 +491,17 @@ def meeting_page() -> None:
             )
             show_job_created(job)
     st.divider()
-    tab_receipts, tab_outputs, tab_records = st.tabs(["Receipt files", "Output PDFs", "Records"])
+    status = meeting_services.status_summary()
+    cols = st.columns(4)
+    cols[0].metric("처리 안됨", status["pendingReceiptCount"])
+    cols[1].metric("처리 완료", status["readyToEmailCount"])
+    cols[2].metric("메일 발송됨", status["emailedCount"])
+    cols[3].metric("전체 산출물", status["outputCount"])
+    tab_receipts, tab_outputs = st.tabs(["Receipt files", "Output files"])
     with tab_receipts:
         file_management_panel(files.list_files(receipt_dir), "meeting-receipts")
     with tab_outputs:
         file_management_panel(files.list_files(output_dir), "meeting-output")
-    with tab_records:
-        records = receipt_dir / "records.csv"
-        summary = receipt_dir / "summary.csv"
-        if records.exists():
-            st.write("records.csv")
-            st.dataframe(pd.read_csv(records), use_container_width=True)
-        if summary.exists():
-            st.write("summary.csv")
-            st.dataframe(pd.read_csv(summary), use_container_width=True)
-        if not records.exists() and not summary.exists():
-            st.info("아직 ledger CSV가 없습니다.")
 
 
 def jobs_page() -> None:

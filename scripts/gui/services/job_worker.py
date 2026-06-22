@@ -7,6 +7,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import automation as automation_services
+from . import notifications as notification_services
 from .paths import JOBS_DIR, ROOT_DIR
 
 
@@ -29,6 +31,36 @@ def update_status(path: Path, **updates: object) -> None:
     status = read_json(path)
     status.update(updates)
     write_json(path, status)
+
+
+def notify_automation_failure(status_path: Path, job_id: str, returncode: int, detail: str, stderr_path: Path | None = None) -> None:
+    status = read_json(status_path)
+    automation = status.get("automation")
+    if not isinstance(automation, dict):
+        return
+    action = str(automation.get("action") or "")
+    schedule = str(automation.get("schedule") or "")
+    key = str(automation.get("key") or "")
+    if not action or not schedule or not key:
+        return
+    stderr = ""
+    if stderr_path and stderr_path.exists():
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+    automation_services.record_run(action, schedule, key, ok=False, detail=detail)
+    try:
+        message_id = notification_services.send_automation_failure(
+            action=action,
+            schedule=schedule,
+            key=key,
+            detail=detail,
+            job_id=job_id,
+            returncode=returncode,
+            stderr=stderr,
+        )
+        if message_id:
+            update_status(status_path, notification_message_id=message_id)
+    except Exception as exc:
+        update_status(status_path, notification_error=str(exc))
 
 
 def load_dotenv(path: Path) -> dict[str, str]:
@@ -58,6 +90,7 @@ def main() -> int:
     command = command_data.get("command")
     if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
         update_status(status_path, state="failed", finished_at=utc_now(), returncode=2)
+        notify_automation_failure(status_path, job_id, 2, "Invalid job command.")
         return 2
     cwd = Path(str(command_data.get("cwd") or ROOT_DIR))
     stdout_path = job_dir / "stdout.log"
@@ -77,6 +110,8 @@ def main() -> int:
         finished_at=utc_now(),
         returncode=returncode,
     )
+    if returncode != 0:
+        notify_automation_failure(status_path, job_id, returncode, f"Job failed with return code {returncode}.", stderr_path)
     return returncode
 
 

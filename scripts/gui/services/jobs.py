@@ -4,12 +4,16 @@ import json
 import re
 import subprocess
 import sys
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from .paths import JOBS_DIR, ROOT_DIR, ensure_gui_dirs
+
+
+AUTOMATION_CONTEXT: ContextVar[dict[str, object] | None] = ContextVar("AUTOMATION_CONTEXT", default=None)
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,9 @@ def start_job(kind: str, command: list[str], metadata: dict[str, object] | None 
     }
     if metadata:
         status.update(metadata)
+    automation_context = AUTOMATION_CONTEXT.get()
+    if automation_context:
+        status["automation"] = automation_context
     write_json(directory / "status.json", status)
     write_json(directory / "command.json", {"command": command, "cwd": str(cwd)})
     subprocess.Popen(

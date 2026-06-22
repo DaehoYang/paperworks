@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image, ImageOps
 from pypdf import PdfReader, PdfWriter
@@ -47,6 +48,11 @@ def compressed_receipt_image(image: Image.Image, max_bytes: int = MAX_RECEIPT_IM
         working = working.resize((max(1, int(working.width * scale)), max(1, int(working.height * scale))), Image.LANCZOS)
 
 
+def receipt_image_jpeg(receipt_path: Path) -> BytesIO:
+    image = ImageOps.exif_transpose(Image.open(receipt_path)).convert("RGB")
+    return compressed_receipt_image(image)
+
+
 def image_page(receipt_path: Path) -> BytesIO:
     image = ImageOps.exif_transpose(Image.open(receipt_path)).convert("RGB")
     page_width, page_height = A4
@@ -80,6 +86,25 @@ def combine_pdfs_and_receipts(report_pdf: Path, receipts: list[Path], output_pdf
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
     with output_pdf.open("wb") as handle:
         writer.write(handle)
+
+
+def receipt_archive_name(index: int, receipt_path: Path, total: int) -> str:
+    suffix = ".pdf" if receipt_path.suffix.lower() == ".pdf" else ".jpg"
+    if total == 1:
+        return f"img{suffix}"
+    return f"img{index}{suffix}"
+
+
+def write_document_receipt_zip(document_pdf: Path, receipts: list[Path], output_zip: Path, document_name: str) -> None:
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(output_zip, "w", compression=ZIP_DEFLATED) as archive:
+        archive.write(document_pdf, document_name)
+        for index, receipt in enumerate(receipts, 1):
+            archive_name = receipt_archive_name(index, receipt, len(receipts))
+            if receipt.suffix.lower() == ".pdf":
+                archive.write(receipt, archive_name)
+            else:
+                archive.writestr(archive_name, receipt_image_jpeg(receipt).getvalue())
 
 
 def fill_form(template_pdf: Path, output_pdf: Path, values: dict[str, str]) -> None:

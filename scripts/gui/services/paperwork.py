@@ -41,6 +41,17 @@ def process_receipts_command(
     return command
 
 
+def send_meeting_mail_command(zip_path: Path, recipient: str) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "scripts.paperwork.meeting.email_zip",
+        repo_relative(zip_path),
+        "--to",
+        recipient,
+    ]
+
+
 def portal_command(
     case_dirs: list[Path],
     project_id: str | None,

@@ -267,8 +267,8 @@ python3 -m scripts.paperwork.meeting.process_receipts \
 출력:
 
 ```text
-meeting/output/<YYMMDD>_<HHMM>_회의록.pdf
-meeting/output/<YYMMDD>_출장보고서.pdf
+meeting/output/<YYMMDD>_<HHMM>_회의록.zip
+meeting/output/<YYMMDD>_출장보고서.zip
 ```
 
 처리 완료 영수증은 기본적으로 `meeting/receipt/used/`로 이동한다. 이동을 막으려면:
@@ -282,6 +282,12 @@ OCR engine 지정:
 ```bash
 python3 -m scripts.paperwork.meeting.process_receipts meeting/receipt/receipt.jpg --ocr-engine codex
 python3 -m scripts.paperwork.meeting.process_receipts meeting/receipt/receipt.jpg --ocr-engine ocr-api-litellm
+```
+
+생성된 zip을 Gmail로 발송:
+
+```bash
+python3 -m scripts.paperwork.meeting.email_zip meeting/output/<YYMMDD>_<HHMM>_회의록.zip
 ```
 
 회의록/출장보고서 규칙은 `scripts/paperwork/assets/information.yml`에서 관리한다.

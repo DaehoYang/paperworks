@@ -72,8 +72,8 @@ def report_date_text(record: ReceiptRecord) -> str:
     return f"{record.generated.year}년 {record.generated.month:02d}월 {record.generated.day:02d}일"
 
 
-def trip_output_pdf(outbound: ReceiptRecord) -> Path:
-    return OUTPUT_DIR / f"{outbound.generated:%y%m%d}_출장보고서.pdf"
+def trip_output_zip(outbound: ReceiptRecord) -> Path:
+    return OUTPUT_DIR / f"{outbound.generated:%y%m%d}_출장보고서.zip"
 
 
 def generate(outbound: ReceiptRecord, inbound: ReceiptRecord, *, traveler: str | None = None, participation: str | None = None, birthdate: str | None = None, account: str | None = None, purpose: str = "공동연구 논의 및 연구 진행 상황 공유", result: str = "") -> tuple[ReceiptRecord, ReceiptRecord]:
@@ -105,16 +105,16 @@ def generate(outbound: ReceiptRecord, inbound: ReceiptRecord, *, traveler: str |
         "작성일자": report_date_text(inbound),
         "연구책임자서명": project.get("연구책임자", ""),
     }
-    combined_pdf = trip_output_pdf(outbound)
+    output_zip = trip_output_zip(outbound)
     with NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
         report_pdf = Path(handle.name)
     try:
         pdf_utils.fill_form(TRIP_TEMPLATE_PDF, report_pdf, values)
-        pdf_utils.combine_pdfs_and_receipts(report_pdf, [outbound.receipt_path, inbound.receipt_path], combined_pdf)
+        pdf_utils.write_document_receipt_zip(report_pdf, [outbound.receipt_path, inbound.receipt_path], output_zip, "출장보고서.pdf")
     finally:
         report_pdf.unlink(missing_ok=True)
     pair_id = outbound.stem
-    rel_pdf = str(combined_pdf.relative_to(OUTPUT_DIR.parents[0]))
+    rel_pdf = str(output_zip.relative_to(OUTPUT_DIR.parents[0]))
     return (
         replace(outbound, status="generated", pair_id=pair_id, document_type="trip", output_pdf=rel_pdf),
         replace(inbound, status="generated", pair_id=pair_id, document_type="trip", output_pdf=rel_pdf),
