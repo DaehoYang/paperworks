@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import base64
+import hashlib
+import hmac
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -12,12 +17,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
+import urllib.error
+import urllib.request
 
 import yaml
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -65,6 +72,27 @@ def service_prefix() -> str:
     return "" if prefix == "/" else prefix
 
 
+def url_path_join(*pieces: str) -> str:
+    initial = pieces[0].startswith("/") if pieces else False
+    final = pieces[-1].endswith("/") if pieces else False
+    stripped = [piece.strip("/") for piece in pieces if piece]
+    result = "/".join(piece for piece in stripped if piece)
+    if initial:
+        result = "/" + result
+    if final and result and not result.endswith("/"):
+        result += "/"
+    return result or "/"
+
+
+def service_path_without_prefix(path: str, prefix: str) -> str:
+    normalized_prefix = prefix.rstrip("/")
+    if normalized_prefix and path == normalized_prefix:
+        return "/"
+    if normalized_prefix and path.startswith(f"{normalized_prefix}/"):
+        return path[len(normalized_prefix) :] or "/"
+    return path
+
+
 class StripServicePrefixMiddleware:
     def __init__(self, app, prefix: str):
         self.app = app
@@ -84,6 +112,209 @@ class StripServicePrefixMiddleware:
             scope["root_path"] = self.prefix
             scope["path"] = path[len(self.prefix) :] or "/"
         await self.app(scope, receive, send)
+
+
+class JupyterHubOAuthMiddleware:
+    def __init__(self, app, prefix: str):
+        self.app = app
+        self.prefix = prefix.rstrip("/")
+        self.enabled = os.environ.get("PAPERWORKS_REQUIRE_JUPYTERHUB_AUTH", "").lower() in {"1", "true", "yes", "on"}
+        self.service_name = os.environ.get("JUPYTERHUB_SERVICE_NAME", "paperworks")
+        self.client_id = os.environ.get("JUPYTERHUB_CLIENT_ID", f"service-{self.service_name}")
+        self.api_token = os.environ.get("JUPYTERHUB_API_TOKEN", "")
+        self.api_url = (os.environ.get("JUPYTERHUB_API_URL") or "http://127.0.0.1:59999/hub/api").rstrip("/")
+        self.hub_base_url = os.environ.get("JUPYTERHUB_BASE_URL", "/")
+        self.hub_prefix = url_path_join(self.hub_base_url, "hub")
+        self.cookie_secret = os.environ.get("PAPERWORKS_COOKIE_SECRET") or self.api_token
+        self.cookie_name = os.environ.get("PAPERWORKS_AUTH_COOKIE", f"paperworks-{self.service_name}-auth")
+        self.state_cookie_name = f"{self.cookie_name}-state"
+        self.cookie_max_age = int(os.environ.get("PAPERWORKS_AUTH_COOKIE_MAX_AGE", "28800"))
+        raw_allowed = os.environ.get("PAPERWORKS_ALLOWED_USERS", "")
+        self.allowed_users = {name.strip() for name in raw_allowed.split(",") if name.strip()}
+        self.required_scope = f"access:services!service={self.service_name}"
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not self.enabled:
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+        path = scope.get("path") or "/"
+        app_path = service_path_without_prefix(path, self.prefix)
+
+        if app_path == "/api/health":
+            await self.app(scope, receive, send)
+            return
+        if app_path == "/oauth_callback":
+            response = await self.oauth_callback(request)
+            await response(scope, receive, send)
+            return
+
+        missing = [name for name, value in {"JUPYTERHUB_API_TOKEN": self.api_token, "JUPYTERHUB_CLIENT_ID": self.client_id}.items() if not value]
+        if missing:
+            response = PlainTextResponse(f"Paperworks JupyterHub auth is enabled but missing: {', '.join(missing)}", status_code=503)
+            await response(scope, receive, send)
+            return
+
+        user = await self.user_from_cookie(request)
+        if user and self.user_allowed(user):
+            await self.app(scope, receive, send)
+            return
+
+        response = self.login_redirect(request)
+        await response(scope, receive, send)
+
+    def callback_path(self) -> str:
+        return url_path_join(self.prefix or "/", "oauth_callback")
+
+    def current_path_with_query(self, request: Request) -> str:
+        value = request.url.path
+        if request.url.query:
+            value += f"?{request.url.query}"
+        return value
+
+    def sign_payload(self, payload: dict[str, object]) -> str:
+        if not self.cookie_secret:
+            raise RuntimeError("cookie secret is not configured")
+        raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        signature = hmac.new(self.cookie_secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).hexdigest()
+        return f"{encoded}.{signature}"
+
+    def unsign_payload(self, value: str) -> dict[str, object] | None:
+        if not value or "." not in value or not self.cookie_secret:
+            return None
+        encoded, signature = value.rsplit(".", 1)
+        expected = hmac.new(self.cookie_secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        padded = encoded + ("=" * (-len(encoded) % 4))
+        try:
+            data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        except (ValueError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def set_signed_cookie(self, response: RedirectResponse, name: str, payload: dict[str, object], max_age: int) -> None:
+        response.set_cookie(
+            name,
+            self.sign_payload(payload),
+            max_age=max_age,
+            path=(self.prefix or "/"),
+            httponly=True,
+            secure=False,
+            samesite="lax",
+        )
+
+    def login_redirect(self, request: Request) -> RedirectResponse:
+        state_payload = {
+            "nonce": secrets.token_urlsafe(24),
+            "next_url": self.current_path_with_query(request),
+            "exp": time.time() + 600,
+        }
+        state = self.sign_payload(state_payload)
+        params = {
+            "client_id": self.client_id,
+            "redirect_uri": self.callback_path(),
+            "response_type": "code",
+            "state": state,
+        }
+        response = RedirectResponse(f"{url_path_join(self.hub_prefix, 'api/oauth2/authorize')}?{urlencode(params)}")
+        self.set_signed_cookie(response, self.state_cookie_name, {"state": state, "exp": time.time() + 600}, 600)
+        return response
+
+    async def oauth_callback(self, request: Request) -> PlainTextResponse | RedirectResponse:
+        error = request.query_params.get("error")
+        if error:
+            return PlainTextResponse(f"JupyterHub OAuth failed: {error}", status_code=403)
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        state_cookie = self.unsign_payload(request.cookies.get(self.state_cookie_name, ""))
+        state_payload = self.unsign_payload(state or "")
+        if not code or not state or not state_cookie or state_cookie.get("state") != state or not state_payload:
+            return PlainTextResponse("Invalid JupyterHub OAuth state.", status_code=403)
+        if float(state_payload.get("exp") or 0) < time.time():
+            return PlainTextResponse("Expired JupyterHub OAuth state.", status_code=403)
+
+        try:
+            token = await self.exchange_code(code)
+            user = await self.user_for_token(token)
+        except Exception as exc:
+            return PlainTextResponse(f"JupyterHub OAuth verification failed: {exc}", status_code=403)
+        if not user or not self.user_allowed(user):
+            name = user.get("name") if isinstance(user, dict) else ""
+            return PlainTextResponse(f"User is not allowed to access Paperworks: {name}", status_code=403)
+
+        next_url = str(state_payload.get("next_url") or self.prefix or "/")
+        response = RedirectResponse(next_url)
+        response.delete_cookie(self.state_cookie_name, path=(self.prefix or "/"))
+        self.set_signed_cookie(
+            response,
+            self.cookie_name,
+            {"token": token, "name": user.get("name"), "exp": time.time() + self.cookie_max_age},
+            self.cookie_max_age,
+        )
+        return response
+
+    async def exchange_code(self, code: str) -> str:
+        body = urlencode(
+            {
+                "client_id": self.client_id,
+                "client_secret": self.api_token,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": self.callback_path(),
+            }
+        ).encode("utf-8")
+
+        def request_token() -> str:
+            request = urllib.request.Request(
+                f"{self.api_url}/oauth2/token",
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            token = data.get("access_token")
+            if not token:
+                raise RuntimeError("OAuth token response did not include access_token")
+            return str(token)
+
+        return await asyncio.to_thread(request_token)
+
+    async def user_for_token(self, token: str) -> dict[str, object]:
+        def request_user() -> dict[str, object]:
+            request = urllib.request.Request(f"{self.api_url}/user", headers={"Authorization": f"Bearer {token}"})
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                raise RuntimeError(f"Hub user lookup failed with HTTP {exc.code}") from exc
+            if not isinstance(data, dict):
+                raise RuntimeError("Hub user lookup returned non-object JSON")
+            return data
+
+        return await asyncio.to_thread(request_user)
+
+    async def user_from_cookie(self, request: Request) -> dict[str, object] | None:
+        payload = self.unsign_payload(request.cookies.get(self.cookie_name, ""))
+        if not payload or float(payload.get("exp") or 0) < time.time():
+            return None
+        token = str(payload.get("token") or "")
+        if not token:
+            return None
+        try:
+            return await self.user_for_token(token)
+        except Exception:
+            return None
+
+    def user_allowed(self, user: dict[str, object]) -> bool:
+        name = str(user.get("name") or "")
+        if self.allowed_users and name not in self.allowed_users:
+            return False
+        scopes = {str(scope) for scope in (user.get("scopes") or [])}
+        return self.required_scope in scopes or "access:services" in scopes
 
 
 @dataclass(frozen=True)
@@ -569,6 +800,7 @@ def reject_duplicate_action(kind: str) -> None:
 
 app = FastAPI(title="Paperworks React GUI")
 app.add_middleware(StripServicePrefixMiddleware, prefix=service_prefix())
+app.add_middleware(JupyterHubOAuthMiddleware, prefix=service_prefix())
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
