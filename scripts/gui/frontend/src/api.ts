@@ -27,6 +27,19 @@ export async function listFiles(): Promise<FileItem[]> {
   return data.files;
 }
 
+export async function uploadFiles(parentPath: string, files: File[]): Promise<FileItem[]> {
+  const form = new FormData();
+  form.append("parentPath", parentPath);
+  for (const file of files) {
+    form.append("file", file);
+  }
+  const data = await requestJson<{ uploaded: FileItem[] }>("api/upload", {
+    method: "POST",
+    body: form,
+  });
+  return data.uploaded;
+}
+
 export async function createFolder(parentPath: string, name: string): Promise<void> {
   await requestJson("api/folders", {
     method: "POST",

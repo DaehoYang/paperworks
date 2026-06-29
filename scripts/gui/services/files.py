@@ -13,9 +13,11 @@ from .paths import MEETING_DIR, PURCHASE_DIR, TRASH_DIR, assert_within_root, rep
 
 UPLOAD_EXTENSIONS = {
     ".pdf",
+    ".docx",
     ".jpg",
     ".jpeg",
     ".png",
+    ".webp",
     ".bmp",
     ".tif",
     ".tiff",
@@ -24,6 +26,7 @@ UPLOAD_EXTENSIONS = {
     ".hwp",
     ".hwpx",
     ".csv",
+    ".json",
     ".txt",
 }
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}

@@ -1,0 +1,102 @@
+{
+  "runs": {
+    "daily:collect_docs:2026-06-23:09": {
+      "action": "collect_docs",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260623-090045-collect_docs-e247590c\", \"kind\": \"collect_docs\", \"state\": \"queued\", \"createdAt\": \"2026-06-23T09:00:45.835085+00:00\"}]}",
+      "recordedAt": "2026-06-23T09:00:45.845912+00:00"
+    },
+    "daily:process_receipts:2026-06-23:09": {
+      "action": "process_receipts",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260623-090045-process_receipts-396f3964\", \"kind\": \"process_receipts\", \"state\": \"queued\", \"createdAt\": \"2026-06-23T09:00:45.877997+00:00\"}]}",
+      "recordedAt": "2026-06-23T09:00:45.879404+00:00"
+    },
+    "daily:collect_docs:2026-06-24:09": {
+      "action": "collect_docs",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260624-090046-collect_docs-3d8d9fe4\", \"kind\": \"collect_docs\", \"state\": \"queued\", \"createdAt\": \"2026-06-24T09:00:46.800700+00:00\"}]}",
+      "recordedAt": "2026-06-24T09:00:46.803074+00:00"
+    },
+    "daily:process_receipts:2026-06-24:09": {
+      "action": "process_receipts",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260624-090046-process_receipts-433fa4f7\", \"kind\": \"process_receipts\", \"state\": \"queued\", \"createdAt\": \"2026-06-24T09:00:46.806471+00:00\"}]}",
+      "recordedAt": "2026-06-24T09:00:46.807650+00:00"
+    },
+    "daily:collect_docs:2026-06-25:09": {
+      "action": "collect_docs",
+      "schedule": "daily",
+      "ok": false,
+      "detail": "Job failed with return code 1.",
+      "recordedAt": "2026-06-25T09:00:49.977378+00:00"
+    },
+    "daily:process_receipts:2026-06-25:09": {
+      "action": "process_receipts",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260625-090048-process_receipts-6383cd86\", \"kind\": \"process_receipts\", \"state\": \"queued\", \"createdAt\": \"2026-06-25T09:00:48.018408+00:00\"}]}",
+      "recordedAt": "2026-06-25T09:00:48.019324+00:00"
+    },
+    "daily:collect_docs:2026-06-26:09": {
+      "action": "collect_docs",
+      "schedule": "daily",
+      "ok": false,
+      "detail": "Job failed with return code 1.",
+      "recordedAt": "2026-06-26T09:00:03.812386+00:00"
+    },
+    "daily:process_receipts:2026-06-26:09": {
+      "action": "process_receipts",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260626-090002-process_receipts-4e39db5c\", \"kind\": \"process_receipts\", \"state\": \"queued\", \"createdAt\": \"2026-06-26T09:00:02.916593+00:00\"}]}",
+      "recordedAt": "2026-06-26T09:00:02.917798+00:00"
+    },
+    "daily:collect_docs:2026-06-27:09": {
+      "action": "collect_docs",
+      "schedule": "daily",
+      "ok": false,
+      "detail": "Job failed with return code 1.",
+      "recordedAt": "2026-06-27T09:00:04.382168+00:00"
+    },
+    "daily:process_receipts:2026-06-27:09": {
+      "action": "process_receipts",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260627-090003-process_receipts-743a9c8a\", \"kind\": \"process_receipts\", \"state\": \"queued\", \"createdAt\": \"2026-06-27T09:00:03.560734+00:00\"}]}",
+      "recordedAt": "2026-06-27T09:00:03.560990+00:00"
+    },
+    "daily:collect_docs:2026-06-28:09": {
+      "action": "collect_docs",
+      "schedule": "daily",
+      "ok": false,
+      "detail": "Job failed with return code 1.",
+      "recordedAt": "2026-06-28T09:00:09.054686+00:00"
+    },
+    "daily:process_receipts:2026-06-28:09": {
+      "action": "process_receipts",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260628-090004-process_receipts-5d151bce\", \"kind\": \"process_receipts\", \"state\": \"queued\", \"createdAt\": \"2026-06-28T09:00:05.016564+00:00\"}]}",
+      "recordedAt": "2026-06-28T09:00:05.026828+00:00"
+    },
+    "daily:collect_docs:2026-06-29:09": {
+      "action": "collect_docs",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260629-090005-collect_docs-113d42d9\", \"kind\": \"collect_docs\", \"state\": \"queued\", \"createdAt\": \"2026-06-29T09:00:05.676472+00:00\"}]}",
+      "recordedAt": "2026-06-29T09:00:05.677393+00:00"
+    },
+    "daily:process_receipts:2026-06-29:09": {
+      "action": "process_receipts",
+      "schedule": "daily",
+      "ok": true,
+      "detail": "{\"jobs\": [{\"id\": \"20260629-090005-process_receipts-dc13c72c\", \"kind\": \"process_receipts\", \"state\": \"queued\", \"createdAt\": \"2026-06-29T09:00:05.726418+00:00\"}]}",
+      "recordedAt": "2026-06-29T09:00:05.726783+00:00"
+    }
+  }
+}

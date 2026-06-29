@@ -10,7 +10,7 @@
   "notificationEmailRecipient": "sheepvs5@gmail.com",
   "actions": {
     "collect_docs": {
-      "dailyEnabled": false,
+      "dailyEnabled": true,
       "dailyHour": 9,
       "monthlyEnabled": false,
       "monthlyDay": 1
@@ -28,7 +28,7 @@
       "monthlyDay": 1
     },
     "process_receipts": {
-      "dailyEnabled": false,
+      "dailyEnabled": true,
       "dailyHour": 9,
       "monthlyEnabled": false,
       "monthlyDay": 1

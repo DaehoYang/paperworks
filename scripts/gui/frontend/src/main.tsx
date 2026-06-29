@@ -29,11 +29,31 @@ import {
   saveAutomationSettings,
   startAction,
   updatePurchaseProject,
+  uploadFiles,
   uploadPurchaseImages,
 } from "./api";
 
 type ManagerFile = FileItem;
 type View = "dashboard" | "files" | "jobs" | "images" | "settings";
+
+const UPLOAD_EXTENSIONS = new Set([
+  ".pdf",
+  ".docx",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".xls",
+  ".xlsx",
+  ".hwp",
+  ".hwpx",
+  ".csv",
+  ".json",
+  ".txt",
+]);
 
 function Preview({ file }: { file: ManagerFile }) {
   if (!file || file.isDirectory) return null;
@@ -219,7 +239,9 @@ function FileBrowser({ initialPath }: { initialPath: string }) {
   const [files, setFiles] = useState<ManagerFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
+  const [dropActive, setDropActive] = useState(false);
   const [currentPath, setCurrentPath] = useState(initialPath || "/purchase");
+  const dragDepth = useRef(0);
 
   useEffect(() => setCurrentPath(initialPath || "/purchase"), [initialPath]);
 
@@ -238,7 +260,20 @@ function FileBrowser({ initialPath }: { initialPath: string }) {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const acceptedFileTypes = useMemo(() => ".pdf,.jpg,.jpeg,.png,.bmp,.tif,.tiff,.xls,.xlsx,.hwp,.hwpx,.csv,.txt", []);
+  const acceptedFileTypes = useMemo(() => ".pdf,.docx,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,.xls,.xlsx,.hwp,.hwpx,.csv,.json,.txt", []);
+  const hasExternalFiles = useCallback((event: React.DragEvent<HTMLElement>) => {
+    return Array.from(event.dataTransfer.types || []).includes("Files");
+  }, []);
+  const droppedFiles = useCallback((event: React.DragEvent<HTMLElement>) => {
+    return Array.from(event.dataTransfer.files || []);
+  }, []);
+  const unsupportedDropFiles = useCallback((items: File[]) => {
+    return items.filter((file) => {
+      const dot = file.name.lastIndexOf(".");
+      const suffix = dot >= 0 ? file.name.slice(dot).toLowerCase() : "";
+      return !UPLOAD_EXTENSIONS.has(suffix);
+    });
+  }, []);
   const run = useCallback(async (operation: () => Promise<void>) => {
     setLoading(true);
     try {
@@ -250,10 +285,60 @@ function FileBrowser({ initialPath }: { initialPath: string }) {
       setLoading(false);
     }
   }, [refresh]);
+  const handleDragEnter = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasExternalFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepth.current += 1;
+    setDropActive(true);
+  }, [hasExternalFiles]);
+  const handleDragOver = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasExternalFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    setDropActive(true);
+  }, [hasExternalFiles]);
+  const handleDragLeave = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasExternalFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDropActive(false);
+  }, [hasExternalFiles]);
+  const handleDrop = useCallback((event: React.DragEvent<HTMLElement>) => {
+    if (!hasExternalFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepth.current = 0;
+    setDropActive(false);
+    const items = droppedFiles(event);
+    if (!items.length) return;
+    const unsupported = unsupportedDropFiles(items);
+    if (unsupported.length) {
+      setMessage(`Unsupported file type: ${unsupported.map((file) => file.name).join(", ")}`);
+      return;
+    }
+    void run(() => uploadFiles(currentPath, items).then(() => undefined));
+  }, [currentPath, droppedFiles, hasExternalFiles, run, unsupportedDropFiles]);
 
   return (
-    <section className="file-browser">
+    <section
+      className={`file-browser${dropActive ? " drop-active" : ""}`}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       {message && <div className="error-banner">{message}</div>}
+      {dropActive ? (
+        <div className="file-drop-overlay">
+          <div>
+            <strong>현재 폴더에 업로드</strong>
+            <span>{currentPath}</span>
+          </div>
+        </div>
+      ) : null}
       <FileManager
         files={files}
         initialPath={currentPath}
