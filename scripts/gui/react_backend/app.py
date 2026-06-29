@@ -66,6 +66,10 @@ ALLOWED_UPLOAD_SUFFIXES = file_services.UPLOAD_EXTENSIONS
 MEETING_INTERNAL_NAMES = {"meeting.sqlite3", "records.csv", "summary.csv"}
 
 
+def jupyterhub_auth_enabled() -> bool:
+    return os.environ.get("PAPERWORKS_REQUIRE_JUPYTERHUB_AUTH", "").lower() in {"1", "true", "yes", "on"}
+
+
 def service_prefix() -> str:
     raw = os.environ.get("PAPERWORKS_BASE_PATH") or os.environ.get("JUPYTERHUB_SERVICE_PREFIX") or ""
     prefix = "/" + raw.strip("/")
@@ -118,7 +122,7 @@ class JupyterHubOAuthMiddleware:
     def __init__(self, app, prefix: str):
         self.app = app
         self.prefix = prefix.rstrip("/")
-        self.enabled = os.environ.get("PAPERWORKS_REQUIRE_JUPYTERHUB_AUTH", "").lower() in {"1", "true", "yes", "on"}
+        self.enabled = jupyterhub_auth_enabled()
         self.service_name = os.environ.get("JUPYTERHUB_SERVICE_NAME", "paperworks")
         self.client_id = os.environ.get("JUPYTERHUB_CLIENT_ID", f"service-{self.service_name}")
         self.api_token = os.environ.get("JUPYTERHUB_API_TOKEN", "")
@@ -129,8 +133,6 @@ class JupyterHubOAuthMiddleware:
         self.cookie_name = os.environ.get("PAPERWORKS_AUTH_COOKIE", f"paperworks-{self.service_name}-auth")
         self.state_cookie_name = f"{self.cookie_name}-state"
         self.cookie_max_age = int(os.environ.get("PAPERWORKS_AUTH_COOKIE_MAX_AGE", "28800"))
-        raw_allowed = os.environ.get("PAPERWORKS_ALLOWED_USERS", "")
-        self.allowed_users = {name.strip() for name in raw_allowed.split(",") if name.strip()}
         self.required_scope = f"access:services!service={self.service_name}"
 
     async def __call__(self, scope, receive, send):
@@ -158,6 +160,8 @@ class JupyterHubOAuthMiddleware:
 
         user = await self.user_from_cookie(request)
         if user and self.user_allowed(user):
+            scope = dict(scope)
+            scope["paperworks_user"] = user
             await self.app(scope, receive, send)
             return
 
@@ -310,9 +314,6 @@ class JupyterHubOAuthMiddleware:
             return None
 
     def user_allowed(self, user: dict[str, object]) -> bool:
-        name = str(user.get("name") or "")
-        if self.allowed_users and name not in self.allowed_users:
-            return False
         scopes = {str(scope) for scope in (user.get("scopes") or [])}
         return self.required_scope in scopes or "access:services" in scopes
 
@@ -366,6 +367,42 @@ class AutomationSettingsRequest(BaseModel):
 class PurchaseProjectRequest(BaseModel):
     casePath: str
     projectId: str
+
+
+def current_user(request: Request) -> dict[str, object]:
+    user = request.scope.get("paperworks_user")
+    if isinstance(user, dict):
+        return user
+    if not jupyterhub_auth_enabled():
+        return {"name": os.environ.get("USER") or "local", "admin": True, "scopes": []}
+    raise HTTPException(status_code=401, detail="not authenticated")
+
+
+def user_role(user: dict[str, object]) -> str:
+    return "admin" if bool(user.get("admin")) else "user"
+
+
+def session_info(request: Request) -> dict[str, object]:
+    user = current_user(request)
+    role = user_role(user)
+    return {
+        "user": str(user.get("name") or ""),
+        "role": role,
+        "admin": role == "admin",
+    }
+
+
+def request_is_admin(request: Request) -> bool:
+    return user_role(current_user(request)) == "admin"
+
+
+def require_admin(request: Request) -> None:
+    if not request_is_admin(request):
+        raise HTTPException(status_code=403, detail="admin access required")
+
+
+def require_user(request: Request) -> None:
+    current_user(request)
 
 
 def utc_iso(timestamp: float) -> str:
@@ -755,6 +792,14 @@ def resolve_purchase_image_path(case_dir: Path, value: str) -> Path:
     return image_resolved
 
 
+def editor_preview_allowed(resolved: ResolvedPath) -> bool:
+    if resolved.root_key != "purchase" or not resolved.path.is_file():
+        return False
+    if resolved.path.suffix.lower() not in file_services.IMAGE_EXTENSIONS:
+        return False
+    return any(part.lower().startswith("img") for part in resolved.path.relative_to(PURCHASE_DIR).parts[:-1])
+
+
 def validate_item_number(item_number: int, item_count: int) -> None:
     if item_number < 1 or item_number > item_count:
         raise HTTPException(status_code=400, detail=f"item number must be between 1 and {item_count}")
@@ -983,8 +1028,14 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/session")
+def session(request: Request) -> dict[str, object]:
+    return session_info(request)
+
+
 @app.get("/api/files")
-def list_files() -> dict[str, object]:
+def list_files(request: Request) -> dict[str, object]:
+    require_admin(request)
     roots = [{"name": key, "isDirectory": True, "path": f"/{key}", "updatedAt": utc_iso(path.stat().st_mtime)} for key, path in ALLOWED_ROOTS.items()]
     children: list[dict[str, object]] = []
     for root in ALLOWED_ROOTS.values():
@@ -994,7 +1045,8 @@ def list_files() -> dict[str, object]:
 
 
 @app.get("/api/dashboard")
-def dashboard() -> dict[str, object]:
+def dashboard(request: Request) -> dict[str, object]:
+    is_admin = request_is_admin(request)
     purchase_cases: list[dict[str, object]] = []
     for case in scan_purchase_root(PURCHASE_DIR):
         if not case.path.name[:1].isdigit():
@@ -1026,6 +1078,14 @@ def dashboard() -> dict[str, object]:
             }
         )
 
+    if not is_admin:
+        return {
+            "projects": [],
+            "purchaseCases": purchase_cases,
+            "meeting": {"items": []},
+            "jobs": [],
+        }
+
     meeting_status = {**meeting_services.status_summary(), "items": meeting_services.meeting_items()}
 
     recent_jobs = []
@@ -1051,7 +1111,8 @@ def dashboard() -> dict[str, object]:
 
 
 @app.get("/api/jobs")
-def list_jobs() -> dict[str, object]:
+def list_jobs(request: Request) -> dict[str, object]:
+    require_admin(request)
     jobs = []
     for job in job_services.list_jobs(limit=100):
         jobs.append(
@@ -1072,7 +1133,8 @@ def list_jobs() -> dict[str, object]:
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str) -> dict[str, object]:
+def get_job(job_id: str, request: Request) -> dict[str, object]:
+    require_admin(request)
     job = job_services.load_job(job_id)
     if not job.dir.exists():
         raise HTTPException(status_code=404, detail="job not found")
@@ -1080,7 +1142,8 @@ def get_job(job_id: str) -> dict[str, object]:
 
 
 @app.get("/api/jobs/{job_id}/stdout")
-def get_job_stdout(job_id: str) -> dict[str, str]:
+def get_job_stdout(job_id: str, request: Request) -> dict[str, str]:
+    require_admin(request)
     job = job_services.load_job(job_id)
     if not job.dir.exists():
         raise HTTPException(status_code=404, detail="job not found")
@@ -1088,7 +1151,8 @@ def get_job_stdout(job_id: str) -> dict[str, str]:
 
 
 @app.get("/api/jobs/{job_id}/stderr")
-def get_job_stderr(job_id: str) -> dict[str, str]:
+def get_job_stderr(job_id: str, request: Request) -> dict[str, str]:
+    require_admin(request)
     job = job_services.load_job(job_id)
     if not job.dir.exists():
         raise HTTPException(status_code=404, detail="job not found")
@@ -1096,54 +1160,64 @@ def get_job_stderr(job_id: str) -> dict[str, str]:
 
 
 @app.get("/api/automation-settings")
-def get_automation_settings() -> dict[str, object]:
+def get_automation_settings(request: Request) -> dict[str, object]:
+    require_admin(request)
     return {"settings": automation_services.read_settings()}
 
 
 @app.post("/api/automation-settings")
-def update_automation_settings(request: AutomationSettingsRequest) -> dict[str, object]:
-    return {"settings": automation_services.write_settings(request.settings)}
+def update_automation_settings(payload: AutomationSettingsRequest, request: Request) -> dict[str, object]:
+    require_admin(request)
+    return {"settings": automation_services.write_settings(payload.settings)}
 
 
 @app.get("/api/projects")
-def get_projects() -> dict[str, object]:
+def get_projects(request: Request) -> dict[str, object]:
+    require_admin(request)
     return {"projects": [project.__dict__ for project in project_services.load_projects()]}
 
 
 @app.post("/api/purchase-project")
-def update_purchase_project(request: PurchaseProjectRequest) -> dict[str, object]:
-    case_dir = resolve_purchase_case_path(request.casePath)
-    set_purchase_project_id(case_dir, request.projectId)
-    return {"casePath": api_path(case_dir), "projectId": request.projectId}
+def update_purchase_project(payload: PurchaseProjectRequest, request: Request) -> dict[str, object]:
+    require_admin(request)
+    case_dir = resolve_purchase_case_path(payload.casePath)
+    set_purchase_project_id(case_dir, payload.projectId)
+    return {"casePath": api_path(case_dir), "projectId": payload.projectId}
 
 
 @app.post("/api/actions/collect_docs")
-def collect_docs() -> dict[str, object]:
+def collect_docs(request: Request) -> dict[str, object]:
+    require_admin(request)
     return start_collect_docs_action()
 
 
 @app.post("/api/actions/generate_purchase_docs")
-def generate_purchase_docs() -> dict[str, object]:
+def generate_purchase_docs(request: Request) -> dict[str, object]:
+    require_admin(request)
     return start_generate_purchase_docs_action()
 
 
 @app.post("/api/actions/upload_purchases")
-def upload_purchases() -> dict[str, object]:
+def upload_purchases(request: Request) -> dict[str, object]:
+    require_admin(request)
     return start_upload_purchases_action()
 
 
 @app.post("/api/actions/process_receipts")
-def process_receipts() -> dict[str, object]:
+def process_receipts(request: Request) -> dict[str, object]:
+    require_admin(request)
     return start_process_receipts_action()
 
 
 @app.post("/api/actions/send_meeting_mail")
-def send_meeting_mail() -> dict[str, object]:
+def send_meeting_mail(request: Request) -> dict[str, object]:
+    require_admin(request)
     return start_send_meeting_mail_action()
 
 
 @app.get("/api/purchase-image-helper")
-def purchase_image_helper(casePath: str) -> dict[str, object]:
+def purchase_image_helper(casePath: str, request: Request) -> dict[str, object]:
+    require_user(request)
     case_dir = resolve_purchase_case_path(casePath)
     quote_path = quote_file_for_case(case_dir)
     item_count = item_count_from_quote(quote_path, case_dir)
@@ -1162,7 +1236,9 @@ async def upload_purchase_images(
     casePath: Annotated[str, Form()],
     itemNumbers: Annotated[str, Form()],
     file: Annotated[list[UploadFile], File()],
+    request: Request,
 ) -> dict[str, object]:
+    require_user(request)
     case_dir = resolve_purchase_case_path(casePath)
     try:
         parsed_numbers = json.loads(itemNumbers)
@@ -1204,7 +1280,8 @@ async def upload_purchase_images(
 
 
 @app.post("/api/purchase-image-helper/delete")
-def delete_purchase_image(payload: DeletePurchaseImageRequest) -> dict[str, object]:
+def delete_purchase_image(payload: DeletePurchaseImageRequest, request: Request) -> dict[str, object]:
+    require_user(request)
     case_dir = resolve_purchase_case_path(payload.casePath)
     image_path = resolve_purchase_image_path(case_dir, payload.path)
     archived_path = archive_purchase_image(image_path)
@@ -1212,7 +1289,8 @@ def delete_purchase_image(payload: DeletePurchaseImageRequest) -> dict[str, obje
 
 
 @app.post("/api/purchase-image-helper/reorder")
-def reorder_purchase_images(payload: ReorderPurchaseImagesRequest) -> dict[str, object]:
+def reorder_purchase_images(payload: ReorderPurchaseImagesRequest, request: Request) -> dict[str, object]:
+    require_user(request)
     case_dir = resolve_purchase_case_path(payload.casePath)
     quote_path = quote_file_for_case(case_dir)
     item_count = item_count_from_quote(quote_path, case_dir)
@@ -1254,15 +1332,18 @@ def reorder_purchase_images(payload: ReorderPurchaseImagesRequest) -> dict[str, 
 
 
 @app.get("/api/preview")
-def preview(path: str) -> FileResponse:
+def preview(path: str, request: Request) -> FileResponse:
     resolved = resolve_path(path)
+    if not request_is_admin(request) and not editor_preview_allowed(resolved):
+        raise HTTPException(status_code=403, detail="admin access required")
     if not resolved.path.exists() or not resolved.path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(resolved.path, media_type=mimetypes.guess_type(resolved.path.name)[0])
 
 
 @app.get("/api/download")
-def download(path: str) -> FileResponse:
+def download(path: str, request: Request) -> FileResponse:
+    require_admin(request)
     resolved = resolve_path(path)
     if not resolved.path.exists() or not resolved.path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
@@ -1270,7 +1351,8 @@ def download(path: str) -> FileResponse:
 
 
 @app.post("/api/folders")
-def create_folder(payload: CreateFolderRequest) -> dict[str, object]:
+def create_folder(payload: CreateFolderRequest, request: Request) -> dict[str, object]:
+    require_admin(request)
     parent = resolve_path(payload.parentPath)
     if not parent.path.exists() or not parent.path.is_dir():
         raise HTTPException(status_code=404, detail="parent folder not found")
@@ -1283,7 +1365,8 @@ def create_folder(payload: CreateFolderRequest) -> dict[str, object]:
 
 
 @app.post("/api/rename")
-def rename(payload: RenameRequest) -> dict[str, object]:
+def rename(payload: RenameRequest, request: Request) -> dict[str, object]:
+    require_admin(request)
     resolved = resolve_path(payload.path)
     if not resolved.path.exists():
         raise HTTPException(status_code=404, detail="path not found")
@@ -1296,7 +1379,8 @@ def rename(payload: RenameRequest) -> dict[str, object]:
 
 
 @app.post("/api/delete")
-def delete(payload: DeleteRequest) -> dict[str, object]:
+def delete(payload: DeleteRequest, request: Request) -> dict[str, object]:
+    require_admin(request)
     TRASH_DIR.mkdir(parents=True, exist_ok=True)
     moved: list[str] = []
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1315,7 +1399,8 @@ def delete(payload: DeleteRequest) -> dict[str, object]:
 
 
 @app.post("/api/move")
-def move(payload: MoveRequest) -> dict[str, object]:
+def move(payload: MoveRequest, request: Request) -> dict[str, object]:
+    require_admin(request)
     destination = resolve_path(payload.destinationPath)
     if not destination.path.exists() or not destination.path.is_dir():
         raise HTTPException(status_code=404, detail="destination folder not found")
@@ -1345,7 +1430,9 @@ def move(payload: MoveRequest) -> dict[str, object]:
 async def upload(
     parentPath: Annotated[str, Form()],
     file: Annotated[list[UploadFile], File()],
+    request: Request,
 ) -> dict[str, object]:
+    require_admin(request)
     parent = resolve_path(parentPath)
     if not parent.path.exists() or not parent.path.is_dir():
         raise HTTPException(status_code=404, detail="parent folder not found")

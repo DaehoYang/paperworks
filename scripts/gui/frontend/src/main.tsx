@@ -11,6 +11,7 @@ import {
   FileItem,
   JobSummary,
   PurchaseImageHelperData,
+  SessionInfo,
   createFolder,
   deletePaths,
   deletePurchaseImage,
@@ -20,6 +21,7 @@ import {
   loadJobs,
   loadPurchaseImageHelper,
   loadDashboard,
+  loadSession,
   loadAutomationSettings,
   loadProjects,
   movePaths,
@@ -92,11 +94,13 @@ function jobStateText(job: { state?: string; returncode?: number | null }) {
 
 function Dashboard({
   data,
+  isAdmin,
   onOpenFiles,
   onOpenImageHelper,
   onRefresh,
 }: {
   data: DashboardData | null;
+  isAdmin: boolean;
   onOpenFiles: (path?: string) => void;
   onOpenImageHelper: (path: string) => void;
   onRefresh: () => Promise<void>;
@@ -119,17 +123,17 @@ function Dashboard({
   return (
     <section className="dashboard">
       <div className="metric-grid">
-        <div className="metric"><span>Projects</span><strong>{data.projects.length}</strong></div>
+        {isAdmin ? <div className="metric"><span>Projects</span><strong>{data.projects.length}</strong></div> : null}
         <div className="metric"><span>Purchase cases</span><strong>{data.purchaseCases.length}</strong></div>
         <div className="metric warn"><span>Incomplete</span><strong>{incompleteCases.length}</strong></div>
         <div className="metric"><span>Ready</span><strong>{readyCases.length}</strong></div>
         <div className="metric"><span>Finished</span><strong>{finishedCases.length}</strong></div>
-        <div className="metric warn"><span>Unprocessed</span><strong>{meetingPending}</strong></div>
-        <div className="metric"><span>Processed</span><strong>{meetingProcessed}</strong></div>
-        <div className="metric"><span>Email sent</span><strong>{meetingEmailed}</strong></div>
+        {isAdmin ? <div className="metric warn"><span>Unprocessed</span><strong>{meetingPending}</strong></div> : null}
+        {isAdmin ? <div className="metric"><span>Processed</span><strong>{meetingProcessed}</strong></div> : null}
+        {isAdmin ? <div className="metric"><span>Email sent</span><strong>{meetingEmailed}</strong></div> : null}
       </div>
 
-      <div className="dashboard-grid">
+      <div className={isAdmin ? "dashboard-grid" : "dashboard-grid single-panel"}>
         <div className="panel">
           <div className="panel-header">
             <h2>Purchase Status</h2>
@@ -137,7 +141,7 @@ function Dashboard({
               <button onClick={() => setShowAllPurchases((value) => !value)}>
                 {showAllPurchases ? "진행중만" : "전체 보기"}
               </button>
-              <button onClick={() => onOpenFiles('/purchase')}>purchase 폴더</button>
+              {isAdmin ? <button onClick={() => onOpenFiles('/purchase')}>purchase 폴더</button> : null}
             </div>
           </div>
           {!showAllPurchases && openCases.length === 0 ? <p className="muted">No open purchase cases.</p> : null}
@@ -146,15 +150,23 @@ function Dashboard({
               const imageActionLabel = item.uploaded ? null : item.workflowStatus === "no images" ? "Upload Images" : "Edit Images";
               const canSelectProject = !item.uploaded;
               return (
-                <div className="case-row" key={item.path} onClick={() => onOpenFiles(item.path)} role="button" tabIndex={0}>
+                <div
+                  className={`case-row${isAdmin ? "" : " read-only"}`}
+                  key={item.path}
+                  onClick={() => {
+                    if (isAdmin) onOpenFiles(item.path);
+                  }}
+                  role={isAdmin ? "button" : undefined}
+                  tabIndex={isAdmin ? 0 : undefined}
+                >
                   <div>
                     <strong>{item.name}</strong>
                     <span>{item.fileCount} files · {fmtDate(item.updatedAt)}</span>
                     {item.missing.length ? <span>missing: {item.missing.join(", ")}</span> : null}
-                    {item.effectiveProjectId ? <span>project: {item.effectiveProjectId}</span> : <span>project: not set</span>}
+                    {isAdmin ? (item.effectiveProjectId ? <span>project: {item.effectiveProjectId}</span> : <span>project: not set</span>) : null}
                   </div>
                   <div className="case-row-actions">
-                    {canSelectProject ? (
+                    {isAdmin && canSelectProject ? (
                       <select
                         className="row-select"
                         value={item.projectId || ""}
@@ -191,7 +203,7 @@ function Dashboard({
           </div>
         </div>
 
-        <div className="panel">
+        {isAdmin ? <div className="panel">
           <div className="panel-header">
             <h2>Meeting</h2>
             <div className="panel-actions">
@@ -216,9 +228,9 @@ function Dashboard({
               );
             })}
           </div>
-        </div>
+        </div> : null}
 
-        <div className="panel">
+        {isAdmin ? <div className="panel">
           <div className="panel-header"><h2>Recent Jobs</h2></div>
           {data.jobs.length === 0 ? <p className="muted">No jobs yet.</p> : null}
           {data.jobs.map((job) => (
@@ -229,7 +241,7 @@ function Dashboard({
               <small>{job.id}</small>
             </div>
           ))}
-        </div>
+        </div> : null}
       </div>
     </section>
   );
@@ -927,6 +939,7 @@ function PurchaseImageHelper({ casePath, onBack }: { casePath: string; onBack: (
 
 function App() {
   const [view, setView] = useState<View>("dashboard");
+  const [session, setSession] = useState<SessionInfo | null>(null);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [browserPath, setBrowserPath] = useState("/purchase");
   const [imageHelperPath, setImageHelperPath] = useState("/purchase");
@@ -944,12 +957,13 @@ function App() {
     [dashboard?.jobs],
   );
   const activeJobCount = activeJobKinds.size;
+  const isAdmin = session?.admin === true;
 
   const refreshDashboard = useCallback(async () => {
     try {
       const nextDashboard = await loadDashboard();
       setDashboard(nextDashboard);
-      const latestJob = nextDashboard.jobs[0];
+      const latestJob = session?.admin ? nextDashboard.jobs[0] : null;
       if (latestJob && jobFailed(latestJob)) {
         setMessageKind("error");
         setMessage(
@@ -962,9 +976,23 @@ function App() {
       setMessageKind("error");
       setMessage(error instanceof Error ? error.message : String(error));
     }
+  }, [session?.admin]);
+
+  useEffect(() => {
+    void loadSession()
+      .then((nextSession) => setSession(nextSession))
+      .catch((error) => {
+        setMessageKind("error");
+        setMessage(error instanceof Error ? error.message : String(error));
+      });
   }, []);
 
   useEffect(() => { void refreshDashboard(); }, [refreshDashboard]);
+
+  useEffect(() => {
+    if (isAdmin || view === "dashboard" || view === "images") return;
+    setView("dashboard");
+  }, [isAdmin, view]);
 
   useEffect(() => {
     if (!activeJobCount) return;
@@ -975,6 +1003,7 @@ function App() {
   }, [activeJobCount, refreshDashboard]);
 
   const openFiles = (path = "/purchase") => {
+    if (!isAdmin) return;
     setBrowserPath(path);
     setView("files");
   };
@@ -985,6 +1014,7 @@ function App() {
   };
 
   const runAction = async (action: ActionName, label: string) => {
+    if (!isAdmin) return;
     setActionRunning(action);
     try {
       const result = await startAction(action);
@@ -1000,7 +1030,7 @@ function App() {
   };
 
   const renderCurrentView = () => {
-    if (view === "dashboard") return <Dashboard data={dashboard} onOpenFiles={openFiles} onOpenImageHelper={openImageHelper} onRefresh={refreshDashboard} />;
+    if (view === "dashboard") return <Dashboard data={dashboard} isAdmin={isAdmin} onOpenFiles={openFiles} onOpenImageHelper={openImageHelper} onRefresh={refreshDashboard} />;
     if (view === "files") return <FileBrowser initialPath={browserPath} />;
     if (view === "images") return <PurchaseImageHelper casePath={imageHelperPath} onBack={() => setView("dashboard")} />;
     if (view === "settings") return <SettingsView />;
@@ -1018,19 +1048,19 @@ function App() {
         </div>
         <nav className="nav-tabs">
           <button className={view === "dashboard" ? "active" : ""} onClick={() => setView("dashboard")}>Dashboard</button>
-          <button className={view === "files" ? "active" : ""} onClick={() => setView("files")}>File Browser</button>
+          {isAdmin ? <button className={view === "files" ? "active" : ""} onClick={() => setView("files")}>File Browser</button> : null}
           <button onClick={() => void refreshDashboard()}>Refresh</button>
-          <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>Settings</button>
+          {isAdmin ? <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>Settings</button> : null}
         </nav>
       </header>
-      <div className="action-bar">
+      {isAdmin ? <div className="action-bar">
         <button className={isActionBusy("collect_docs") ? "running" : ""} disabled={isActionBusy("collect_docs")} onClick={() => void runAction("collect_docs", "Collect Docs")}>Collect Docs</button>
         <button className={isActionBusy("generate_purchase_docs") ? "running" : ""} disabled={isActionBusy("generate_purchase_docs")} onClick={() => void runAction("generate_purchase_docs", "Generate Purchase Docs")}>Generate Purchase Docs</button>
         <button className={isActionBusy("upload_purchases") ? "running" : ""} disabled={isActionBusy("upload_purchases")} onClick={() => void runAction("upload_purchases", "Upload Purchases")}>Upload Purchases</button>
         <button className={isActionBusy("process_receipts") ? "running" : ""} disabled={isActionBusy("process_receipts")} onClick={() => void runAction("process_receipts", "Process Receipts")}>Process Receipts</button>
         <button className={isActionBusy("send_meeting_mail") ? "running" : ""} disabled={isActionBusy("send_meeting_mail")} onClick={() => void runAction("send_meeting_mail", "Send mail")}>Send mail</button>
         <button onClick={() => setView("jobs")}>Jobs</button>
-      </div>
+      </div> : null}
       {message && <div className={messageKind === "success" ? "success-banner" : "error-banner"}>{message}</div>}
       {renderCurrentView()}
     </main>

@@ -233,6 +233,10 @@ body {
   gap: 14px;
 }
 
+.dashboard-grid.single-panel {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .panel {
   background: #fff;
   border: 1px solid #e5e7eb;
@@ -305,6 +309,10 @@ body {
 .missing-row:hover,
 .panel-header button:hover {
   background: #f8fafc;
+}
+
+.case-row.read-only {
+  cursor: default;
 }
 
 .case-row span,

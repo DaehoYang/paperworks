@@ -82,6 +82,16 @@ export function downloadUrl(path: string): string {
 
 export type ProjectInfo = { key: string; no: string; name: string; start_date?: string; end_date?: string };
 
+export type SessionInfo = {
+  user: string;
+  role: "admin" | "user";
+  admin: boolean;
+};
+
+export async function loadSession(): Promise<SessionInfo> {
+  return requestJson<SessionInfo>("api/session");
+}
+
 export type DashboardData = {
   projects: ProjectInfo[];
   purchaseCases: Array<{

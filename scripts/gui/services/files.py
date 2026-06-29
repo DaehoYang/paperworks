@@ -29,7 +29,7 @@ UPLOAD_EXTENSIONS = {
     ".json",
     ".txt",
 }
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 PREVIEW_TEXT_EXTENSIONS = {".txt", ".csv", ".json", ".md"}
 CASE_NAME_RE = re.compile(r"^[0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣ_. -]+$")
 
