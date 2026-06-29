@@ -3,13 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.documents.classifiers import DOC_TYPES, document_types_from_filename, extract_codes
 from scripts.documents.vendors import parse_case_name
 
 
-DOCUMENT_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".hwp", ".hwpx", ".xls", ".xlsx"}
+DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".hwp", ".hwpx", ".xls", ".xlsx"}
+FILES_INFO_NAME = "files_info.json"
 IGNORED_NAMES = {"items.xls", "물품검수확인서_작성.pdf", "물품검수확인서.pdf"}
 IGNORED_DIRS = {
     ".incoming",
@@ -128,13 +130,131 @@ def sidecar_document_types(file_path: Path) -> list[str]:
     return _ordered_doc_types(values)
 
 
+def files_info_path(case_dir: Path) -> Path:
+    return case_dir / FILES_INFO_NAME
+
+
+def read_files_info(case_dir: Path) -> dict[str, object]:
+    path = files_info_path(case_dir)
+    if not path.exists():
+        return {"version": 1, "files": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "files": {}}
+    if not isinstance(data, dict):
+        return {"version": 1, "files": {}}
+    files = data.get("files")
+    if not isinstance(files, dict):
+        files = {}
+    return {"version": int(data.get("version") or 1), "files": files}
+
+
+def write_files_info(case_dir: Path, info: dict[str, object]) -> Path:
+    files = info.get("files")
+    if not isinstance(files, dict):
+        files = {}
+    cleaned = {
+        "version": int(info.get("version") or 1),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "files": files,
+    }
+    path = files_info_path(case_dir)
+    path.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def file_info_entry(file_path: Path, files_info: dict[str, object]) -> dict[str, object]:
+    files = files_info.get("files")
+    if not isinstance(files, dict):
+        return {}
+    entry = files.get(file_path.name)
+    return entry if isinstance(entry, dict) else {}
+
+
+def metadata_document_types(metadata: dict[str, object]) -> list[str]:
+    raw_doc_type = metadata.get("doc_type")
+    primary = raw_doc_type if isinstance(raw_doc_type, str) else None
+    values: list[str] = []
+    raw_all = metadata.get("all_doc_types")
+    if isinstance(raw_all, list):
+        values.extend(item for item in raw_all if isinstance(item, str))
+
+    raw_all_json = metadata.get("all_doc_types_json")
+    if isinstance(raw_all_json, str) and raw_all_json:
+        try:
+            parsed = json.loads(raw_all_json)
+        except json.JSONDecodeError:
+            parsed = []
+        if isinstance(parsed, list):
+            values.extend(item for item in parsed if isinstance(item, str))
+
+    if primary == "tax_invoice":
+        values = [value for value in values if value not in {"business_registration", "bankbook_copy"}]
+    if primary:
+        values.insert(0, primary)
+    return _ordered_doc_types(values)
+
+
+def files_info_document_types(file_path: Path, files_info: dict[str, object]) -> list[str]:
+    return metadata_document_types(file_info_entry(file_path, files_info))
+
+
+def document_types_for_file(file_path: Path, files_info: dict[str, object] | None = None) -> list[str]:
+    return _ordered_doc_types([
+        *files_info_document_types(file_path, files_info or read_files_info(file_path.parent)),
+        *sidecar_document_types(file_path),
+        *document_types_from_filename(file_path.name),
+    ])
+
+
+def update_file_info(case_dir: Path, file_path: Path, metadata: dict[str, object]) -> None:
+    info = read_files_info(case_dir)
+    files = info.setdefault("files", {})
+    if not isinstance(files, dict):
+        files = {}
+        info["files"] = files
+    previous = files.get(file_path.name)
+    entry = previous.copy() if isinstance(previous, dict) else {}
+    entry.update(metadata)
+    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+    files[file_path.name] = entry
+    write_files_info(case_dir, info)
+
+
+def remove_file_info(case_dir: Path, filename: str) -> None:
+    info = read_files_info(case_dir)
+    files = info.get("files")
+    if not isinstance(files, dict) or filename not in files:
+        return
+    files.pop(filename, None)
+    write_files_info(case_dir, info)
+
+
+def rename_file_info(case_dir: Path, old_name: str, new_name: str) -> None:
+    info = read_files_info(case_dir)
+    files = info.get("files")
+    if not isinstance(files, dict) or old_name not in files:
+        return
+    files[new_name] = files.pop(old_name)
+    write_files_info(case_dir, info)
+
+
+def copy_file_info(source_dir: Path, source_name: str, destination_dir: Path, destination_name: str) -> None:
+    source_entry = file_info_entry(source_dir / source_name, read_files_info(source_dir))
+    if not source_entry:
+        return
+    update_file_info(destination_dir, destination_dir / destination_name, source_entry.copy())
+
+
 def scan_purchase_case(path: Path) -> PurchaseCase:
     parsed = parse_case_name(path)
     docs: dict[str, list[Path]] = {}
     code_texts: list[str] = [path.name]
+    files_info = read_files_info(path)
     for file_path in immediate_document_files(path):
         code_texts.append(file_path.name)
-        doc_types = _ordered_doc_types([*sidecar_document_types(file_path), *document_types_from_filename(file_path.name)])
+        doc_types = document_types_for_file(file_path, files_info)
         for doc_type in doc_types:
             docs.setdefault(doc_type, []).append(file_path)
     document_number, item_code = extract_codes("\n".join(code_texts))

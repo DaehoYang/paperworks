@@ -33,7 +33,7 @@ from scripts.documents.place_purchase_docs import (
     refresh_vendor_store_from_purchase,
     vendor_metadata,
 )
-from scripts.documents.purchase_scan import scan_purchase_root
+from scripts.documents.purchase_scan import document_types_for_file, rename_file_info, scan_purchase_root, update_file_info
 
 
 def write_blank_pdf(path: Path) -> None:
@@ -113,6 +113,53 @@ class PurchaseScanDbTests(unittest.TestCase):
                     "bankbook_copy",
                 },
             )
+
+    def test_scan_uses_files_info_doc_type(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "purchase"
+            case = root / "260629_업체"
+            case.mkdir(parents=True)
+            pdf = case / "scan001.pdf"
+            pdf.write_bytes(b"estimate")
+            update_file_info(
+                case,
+                pdf,
+                {
+                    "doc_type": "estimate",
+                    "all_doc_types": ["estimate"],
+                    "classification": "manual",
+                },
+            )
+
+            cases = scan_purchase_root(root)
+            self.assertEqual(len(cases), 1)
+            self.assertIn("estimate", cases[0].local_docs)
+            self.assertEqual(cases[0].local_docs["estimate"], [pdf])
+
+    def test_files_info_rename_updates_scan_key(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "purchase"
+            case = root / "260629_업체"
+            case.mkdir(parents=True)
+            old_pdf = case / "scan001.pdf"
+            new_pdf = case / "renamed.pdf"
+            old_pdf.write_bytes(b"statement")
+            update_file_info(case, old_pdf, {"doc_type": "statement", "all_doc_types": ["statement"]})
+            old_pdf.rename(new_pdf)
+            rename_file_info(case, old_pdf.name, new_pdf.name)
+
+            cases = scan_purchase_root(root)
+            self.assertEqual(len(cases), 1)
+            self.assertEqual(cases[0].local_docs["statement"], [new_pdf])
+
+    def test_document_types_for_file_falls_back_to_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            case = Path(td) / "260629_업체"
+            case.mkdir()
+            statement = case / "거명.pdf"
+            statement.write_bytes(b"statement")
+
+            self.assertEqual(document_types_for_file(statement), ["statement"])
 
     def test_refresh_vendor_store_from_purchase(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -30,11 +30,27 @@ from pydantic import BaseModel
 
 from scripts.documents.classifiers import (
     DOC_TYPE_LABELS,
+    DOC_TYPES,
+    classify_document,
+    classify_document_content,
     missing_documents_for_doc_types,
     purchase_status_from_doc_types,
     required_documents_for_doc_types,
 )
-from scripts.documents.purchase_scan import scan_purchase_root
+from scripts.documents.amounts import extract_pdf_text
+from scripts.documents.purchase_scan import (
+    DOCUMENT_EXTENSIONS as PURCHASE_DOCUMENT_EXTENSIONS,
+    copy_file_info,
+    document_types_for_file,
+    file_sha256,
+    file_info_entry,
+    immediate_document_files,
+    read_files_info,
+    remove_file_info,
+    rename_file_info,
+    scan_purchase_root,
+    update_file_info,
+)
 from scripts.documents.db import connect as connect_documents_db
 from scripts.documents.db import purchase_workflow_for_case_dir
 from scripts.gui.services import automation as automation_services
@@ -367,6 +383,12 @@ class AutomationSettingsRequest(BaseModel):
 class PurchaseProjectRequest(BaseModel):
     casePath: str
     projectId: str
+
+
+class PurchaseDocTypeRequest(BaseModel):
+    casePath: str
+    path: str
+    docType: str
 
 
 def current_user(request: Request) -> dict[str, object]:
@@ -830,6 +852,99 @@ def resolve_purchase_case_path(value: str) -> Path:
     return resolved.path
 
 
+def direct_purchase_case_dir_for_file(path: Path) -> Path | None:
+    purchase_root = PURCHASE_DIR.resolve()
+    parent = path.parent.resolve()
+    if parent == purchase_root or purchase_root not in parent.parents:
+        return None
+    if not parent.name[:1].isdigit():
+        return None
+    return parent
+
+
+def classify_purchase_upload(path: Path) -> dict[str, object]:
+    fallback = classify_document(path.name)
+    classification = fallback
+    source = "filename"
+    if path.suffix.lower() == ".pdf":
+        try:
+            text = extract_pdf_text(path)
+        except Exception:
+            text = ""
+        if text.strip():
+            classification = classify_document_content(path.name, text, fallback)
+            source = "pdf_text"
+    return {
+        "doc_type": classification.doc_type,
+        "all_doc_types": list(classification.all_doc_types or (classification.doc_type,)),
+        "classification": "auto",
+        "classification_source": source,
+        "confidence": classification.confidence,
+        "reason": classification.reason,
+        "document_number": classification.document_number,
+        "item_code": classification.item_code,
+        "source": "manual_upload",
+        "source_filename": path.name,
+        "sha256": file_sha256(path),
+    }
+
+
+def record_purchase_upload_info(path: Path) -> None:
+    if path.name == "files_info.json":
+        return
+    case_dir = direct_purchase_case_dir_for_file(path)
+    if not case_dir:
+        return
+    update_file_info(case_dir, path, classify_purchase_upload(path))
+
+
+def purchase_doc_info(case_dir: Path, path: Path) -> dict[str, object]:
+    files_info = read_files_info(case_dir)
+    entry = file_info_entry(path, files_info)
+    inferred_types = document_types_for_file(path, files_info)
+    doc_type = str(entry.get("doc_type") or (inferred_types[0] if inferred_types else "unknown"))
+    all_doc_types = entry.get("all_doc_types")
+    if not isinstance(all_doc_types, list):
+        all_doc_types = inferred_types or ([doc_type] if doc_type in DOC_TYPES else [])
+    classification = entry.get("classification") or ("auto" if inferred_types else "")
+    classification_source = entry.get("classification_source") or ("existing metadata/name" if inferred_types else "")
+    reason = entry.get("reason") or ("existing files_info/sidecar/filename classification" if inferred_types else "")
+    return {
+        "name": path.name,
+        "path": api_path(path),
+        "docType": doc_type,
+        "docTypeLabel": DOC_TYPE_LABELS.get(doc_type, "미분류"),
+        "allDocTypes": [str(value) for value in all_doc_types],
+        "classification": classification,
+        "classificationSource": classification_source,
+        "confidence": entry.get("confidence"),
+        "reason": reason,
+        "updatedAt": entry.get("updated_at") or utc_iso(path.stat().st_mtime),
+    }
+
+
+def set_purchase_doc_type(case_dir: Path, path: Path, doc_type: str) -> dict[str, object]:
+    if doc_type != "unknown" and doc_type not in DOC_TYPES:
+        raise HTTPException(status_code=400, detail=f"unknown document type: {doc_type}")
+    all_doc_types = [doc_type] if doc_type in DOC_TYPES else []
+    update_file_info(
+        case_dir,
+        path,
+        {
+            "doc_type": doc_type,
+            "all_doc_types": all_doc_types,
+            "classification": "manual",
+            "classification_source": "user",
+            "confidence": 1.0,
+            "reason": "manual override",
+            "source": "manual_upload",
+            "source_filename": path.name,
+            "sha256": file_sha256(path),
+        },
+    )
+    return purchase_doc_info(case_dir, path)
+
+
 def active_job_for_kind(kind: str) -> job_services.Job | None:
     for job in job_services.list_jobs(limit=100):
         if job.status.get("kind") == kind and job.status.get("state") in {"queued", "running"}:
@@ -1215,6 +1330,51 @@ def send_meeting_mail(request: Request) -> dict[str, object]:
     return start_send_meeting_mail_action()
 
 
+@app.get("/api/purchase-docs")
+def purchase_docs(casePath: str, request: Request) -> dict[str, object]:
+    require_user(request)
+    case_dir = resolve_purchase_case_path(casePath)
+    docs = [purchase_doc_info(case_dir, path) for path in immediate_document_files(case_dir)]
+    return {"casePath": api_path(case_dir), "caseName": case_dir.name, "documents": docs}
+
+
+@app.post("/api/purchase-docs/upload")
+async def upload_purchase_docs(
+    casePath: Annotated[str, Form()],
+    file: Annotated[list[UploadFile], File()],
+    request: Request,
+) -> dict[str, object]:
+    require_user(request)
+    case_dir = resolve_purchase_case_path(casePath)
+    saved: list[dict[str, object]] = []
+    for upload_file in file:
+        filename = file_services.safe_filename(upload_file.filename or "uploaded.bin")
+        if filename == "files_info.json":
+            raise HTTPException(status_code=403, detail="files_info.json is reserved")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in PURCHASE_DOCUMENT_EXTENSIONS:
+            raise HTTPException(status_code=403, detail=f"unsupported file type: {suffix}")
+        target = unique_destination(case_dir / filename)
+        with target.open("wb") as handle:
+            while chunk := await upload_file.read(1024 * 1024):
+                handle.write(chunk)
+        record_purchase_upload_info(target)
+        saved.append(purchase_doc_info(case_dir, target))
+    return {"casePath": api_path(case_dir), "caseName": case_dir.name, "documents": saved}
+
+
+@app.post("/api/purchase-docs/doc-type")
+def update_purchase_doc_type(payload: PurchaseDocTypeRequest, request: Request) -> dict[str, object]:
+    require_user(request)
+    case_dir = resolve_purchase_case_path(payload.casePath)
+    resolved = resolve_path(payload.path)
+    if resolved.root_key != "purchase" or not resolved.path.is_file():
+        raise HTTPException(status_code=404, detail="document not found")
+    if resolved.path.parent.resolve() != case_dir.resolve():
+        raise HTTPException(status_code=403, detail="document must be directly inside purchase case")
+    return {"document": set_purchase_doc_type(case_dir, resolved.path, payload.docType)}
+
+
 @app.get("/api/purchase-image-helper")
 def purchase_image_helper(casePath: str, request: Request) -> dict[str, object]:
     require_user(request)
@@ -1374,7 +1534,11 @@ def rename(payload: RenameRequest, request: Request) -> dict[str, object]:
     target = resolved.path.parent / name
     if target.exists():
         raise HTTPException(status_code=409, detail="target already exists")
+    was_file = resolved.path.is_file()
+    case_dir = direct_purchase_case_dir_for_file(resolved.path) if was_file else None
     resolved.path.rename(target)
+    if case_dir and direct_purchase_case_dir_for_file(target) == case_dir:
+        rename_file_info(case_dir, resolved.path.name, target.name)
     return {"file": file_item(target)}
 
 
@@ -1393,7 +1557,10 @@ def delete(payload: DeleteRequest, request: Request) -> dict[str, object]:
         if not resolved.path.exists():
             continue
         target = unique_destination(target_base / resolved.path.name)
+        case_dir = direct_purchase_case_dir_for_file(resolved.path) if resolved.path.is_file() else None
         shutil.move(str(resolved.path), str(target))
+        if case_dir:
+            remove_file_info(case_dir, resolved.path.name)
         moved.append(api_path(resolved.path))
     return {"deleted": moved}
 
@@ -1412,6 +1579,8 @@ def move(payload: MoveRequest, request: Request) -> dict[str, object]:
         if not source.path.exists():
             continue
         target = unique_destination(destination.path / source.path.name)
+        source_was_file = source.path.is_file()
+        source_case_dir = direct_purchase_case_dir_for_file(source.path) if source_was_file else None
         if source.path.is_dir():
             if payload.operation == "copy":
                 shutil.copytree(source.path, target)
@@ -1422,6 +1591,19 @@ def move(payload: MoveRequest, request: Request) -> dict[str, object]:
                 shutil.copy2(source.path, target)
             else:
                 shutil.move(str(source.path), str(target))
+        target_case_dir = direct_purchase_case_dir_for_file(target) if target.is_file() else None
+        if source_case_dir and source_was_file:
+            if payload.operation == "copy":
+                if target_case_dir:
+                    copy_file_info(source_case_dir, source.path.name, target_case_dir, target.name)
+            elif target_case_dir and source_case_dir == target_case_dir:
+                rename_file_info(source_case_dir, source.path.name, target.name)
+            else:
+                if target_case_dir:
+                    copy_file_info(source_case_dir, source.path.name, target_case_dir, target.name)
+                remove_file_info(source_case_dir, source.path.name)
+        elif target_case_dir and target.is_file():
+            record_purchase_upload_info(target)
         copied.append(api_path(target))
     return {"paths": copied}
 
@@ -1447,6 +1629,7 @@ async def upload(
         with target.open("wb") as handle:
             while chunk := await upload_file.read(1024 * 1024):
                 handle.write(chunk)
+        record_purchase_upload_info(target)
         saved.append(file_item(target))
     return {"uploaded": saved}
 

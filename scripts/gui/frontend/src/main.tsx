@@ -10,6 +10,8 @@ import {
   DashboardData,
   FileItem,
   JobSummary,
+  PurchaseDocType,
+  PurchaseDocsData,
   PurchaseImageHelperData,
   SessionInfo,
   createFolder,
@@ -19,6 +21,7 @@ import {
   listFiles,
   loadJobLog,
   loadJobs,
+  loadPurchaseDocs,
   loadPurchaseImageHelper,
   loadDashboard,
   loadSession,
@@ -31,7 +34,9 @@ import {
   saveAutomationSettings,
   startAction,
   updatePurchaseProject,
+  updatePurchaseDocType,
   uploadFiles,
+  uploadPurchaseDocs,
   uploadPurchaseImages,
 } from "./api";
 
@@ -56,6 +61,18 @@ const UPLOAD_EXTENSIONS = new Set([
   ".json",
   ".txt",
 ]);
+
+const PURCHASE_DOC_OPTIONS: Array<{ value: PurchaseDocType; label: string }> = [
+  { value: "unknown", label: "기타/미분류" },
+  { value: "estimate", label: "견적서" },
+  { value: "statement", label: "거래명세서" },
+  { value: "tax_invoice", label: "전자세금계산서" },
+  { value: "business_registration", label: "사업자등록증" },
+  { value: "bankbook_copy", label: "통장사본" },
+  { value: "receipt", label: "영수증" },
+];
+
+const PURCHASE_DOC_ACCEPT = ".pdf,.docx,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,.xls,.xlsx,.hwp,.hwpx";
 
 function Preview({ file }: { file: ManagerFile }) {
   if (!file || file.isDirectory) return null;
@@ -96,12 +113,14 @@ function Dashboard({
   data,
   isAdmin,
   onOpenFiles,
+  onOpenDocs,
   onOpenImageHelper,
   onRefresh,
 }: {
   data: DashboardData | null;
   isAdmin: boolean;
   onOpenFiles: (path?: string) => void;
+  onOpenDocs: (path: string) => void;
   onOpenImageHelper: (path: string) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -185,6 +204,17 @@ function Dashboard({
                     <em className={`badge ${item.status} ${item.workflowStatus.replace(/\s+/g, "-")}`}>
                       {item.statusLabel}
                     </em>
+                    {!item.uploaded ? (
+                      <button
+                        className="row-action"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onOpenDocs(item.path);
+                        }}
+                      >
+                        Add Docs
+                      </button>
+                    ) : null}
                     {imageActionLabel ? (
                       <button
                         className="row-action"
@@ -244,6 +274,187 @@ function Dashboard({
         </div> : null}
       </div>
     </section>
+  );
+}
+
+function PurchaseDocsModal({
+  casePath,
+  onClose,
+  onRefreshDashboard,
+}: {
+  casePath: string;
+  onClose: () => void;
+  onRefreshDashboard: () => Promise<void>;
+}) {
+  const [data, setData] = useState<PurchaseDocsData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [message, setMessage] = useState("");
+  const [messageKind, setMessageKind] = useState<"error" | "success">("error");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      setData(await loadPurchaseDocs(casePath));
+      setMessage("");
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  }, [casePath]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const addFiles = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList);
+    if (!files.length) return;
+    setSaving(true);
+    try {
+      const result = await uploadPurchaseDocs(casePath, files);
+      setData((current) => {
+        const existing = new Map((current?.documents || []).map((doc) => [doc.path, doc]));
+        for (const doc of result.documents) existing.set(doc.path, doc);
+        return { ...(current || result), documents: Array.from(existing.values()) };
+      });
+      await onRefreshDashboard();
+      setMessageKind("success");
+      setMessage(`Uploaded ${result.documents.length} document${result.documents.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changeDocType = async (path: string, docType: PurchaseDocType) => {
+    setSaving(true);
+    try {
+      const result = await updatePurchaseDocType(casePath, path, docType);
+      setData((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          documents: current.documents.map((doc) => (doc.path === path ? result.document : doc)),
+        };
+      });
+      await onRefreshDashboard();
+      setMessageKind("success");
+      setMessage("Document type updated.");
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal-panel docs-modal">
+        <div className="panel-header">
+          <div>
+            <h2>Add Docs</h2>
+            <p className="muted">{data?.caseName || casePath}</p>
+          </div>
+          <div className="panel-actions">
+            <button onClick={() => void refresh()} disabled={loading || saving}>Refresh</button>
+            <button onClick={onClose}>Close</button>
+          </div>
+        </div>
+        {message ? <div className={messageKind === "success" ? "success-banner" : "error-banner"}>{message}</div> : null}
+        <div
+          className={`drop-zone docs-drop-zone ${dragActive ? "active" : ""}`}
+          role="button"
+          tabIndex={0}
+          onClick={() => fileInputRef.current?.click()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              fileInputRef.current?.click();
+            }
+          }}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setDragActive(true);
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = "copy";
+          }}
+          onDragLeave={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setDragActive(false);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setDragActive(false);
+            void addFiles(event.dataTransfer.files);
+          }}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={PURCHASE_DOC_ACCEPT}
+            disabled={saving}
+            onChange={(event) => {
+              if (event.target.files) void addFiles(event.target.files);
+              event.currentTarget.value = "";
+            }}
+          />
+          <strong>{saving ? "Saving..." : "Drop documents here"}</strong>
+          <span>Files are auto-classified and can be corrected below.</span>
+        </div>
+        <div className="docs-table-wrap">
+          <table className="docs-table">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Type</th>
+                <th>Source</th>
+                <th>Confidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data?.documents.length ? data.documents.map((doc) => (
+                <tr key={doc.path}>
+                  <td>
+                    <strong>{doc.name}</strong>
+                    {doc.reason ? <span>{doc.reason}</span> : null}
+                  </td>
+                  <td>
+                    <select
+                      value={doc.docType || "unknown"}
+                      disabled={saving}
+                      onChange={(event) => void changeDocType(doc.path, event.target.value as PurchaseDocType)}
+                    >
+                      {PURCHASE_DOC_OPTIONS.map((option) => (
+                        <option value={option.value} key={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>{doc.classificationSource || doc.classification || "-"}</td>
+                  <td>{typeof doc.confidence === "number" ? doc.confidence.toFixed(2) : "-"}</td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={4}>{loading ? "Loading documents..." : "No documents yet."}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -900,7 +1111,7 @@ function PurchaseImageHelper({ casePath, onBack }: { casePath: string; onBack: (
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept="image/*,.jpg,.jpeg,.png,.bmp,.tif,.tiff"
+                accept="image/*,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff"
                 disabled={!itemCount}
                 onChange={(event) => {
                   if (event.target.files) addFiles(event.target.files);
@@ -943,6 +1154,7 @@ function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [browserPath, setBrowserPath] = useState("/purchase");
   const [imageHelperPath, setImageHelperPath] = useState("/purchase");
+  const [docsCasePath, setDocsCasePath] = useState<string | null>(null);
   const [actionRunning, setActionRunning] = useState<ActionName | null>(null);
   const [message, setMessage] = useState("");
   const [messageKind, setMessageKind] = useState<"error" | "success">("error");
@@ -1013,6 +1225,10 @@ function App() {
     setView("images");
   };
 
+  const openDocs = (path: string) => {
+    setDocsCasePath(path);
+  };
+
   const runAction = async (action: ActionName, label: string) => {
     if (!isAdmin) return;
     setActionRunning(action);
@@ -1030,7 +1246,7 @@ function App() {
   };
 
   const renderCurrentView = () => {
-    if (view === "dashboard") return <Dashboard data={dashboard} isAdmin={isAdmin} onOpenFiles={openFiles} onOpenImageHelper={openImageHelper} onRefresh={refreshDashboard} />;
+    if (view === "dashboard") return <Dashboard data={dashboard} isAdmin={isAdmin} onOpenFiles={openFiles} onOpenDocs={openDocs} onOpenImageHelper={openImageHelper} onRefresh={refreshDashboard} />;
     if (view === "files") return <FileBrowser initialPath={browserPath} />;
     if (view === "images") return <PurchaseImageHelper casePath={imageHelperPath} onBack={() => setView("dashboard")} />;
     if (view === "settings") return <SettingsView />;
@@ -1063,6 +1279,7 @@ function App() {
       </div> : null}
       {message && <div className={messageKind === "success" ? "success-banner" : "error-banner"}>{message}</div>}
       {renderCurrentView()}
+      {docsCasePath ? <PurchaseDocsModal casePath={docsCasePath} onClose={() => setDocsCasePath(null)} onRefreshDashboard={refreshDashboard} /> : null}
     </main>
   );
 }

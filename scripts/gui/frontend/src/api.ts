@@ -217,6 +217,58 @@ export async function updatePurchaseProject(casePath: string, projectId: string)
   });
 }
 
+export type PurchaseDocType =
+  | "unknown"
+  | "tax_invoice"
+  | "estimate"
+  | "statement"
+  | "business_registration"
+  | "bankbook_copy"
+  | "receipt";
+
+export type PurchaseDocumentInfo = {
+  name: string;
+  path: string;
+  docType: PurchaseDocType | string;
+  docTypeLabel: string;
+  allDocTypes: string[];
+  classification?: string;
+  classificationSource?: string;
+  confidence?: number | null;
+  reason?: string;
+  updatedAt?: string;
+};
+
+export type PurchaseDocsData = {
+  casePath: string;
+  caseName: string;
+  documents: PurchaseDocumentInfo[];
+};
+
+export async function loadPurchaseDocs(casePath: string): Promise<PurchaseDocsData> {
+  return requestJson<PurchaseDocsData>(`api/purchase-docs?casePath=${encodeURIComponent(casePath)}`);
+}
+
+export async function uploadPurchaseDocs(casePath: string, files: File[]): Promise<PurchaseDocsData> {
+  const form = new FormData();
+  form.append("casePath", casePath);
+  for (const file of files) {
+    form.append("file", file);
+  }
+  return requestJson<PurchaseDocsData>("api/purchase-docs/upload", {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function updatePurchaseDocType(casePath: string, path: string, docType: PurchaseDocType): Promise<{ document: PurchaseDocumentInfo }> {
+  return requestJson<{ document: PurchaseDocumentInfo }>("api/purchase-docs/doc-type", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ casePath, path, docType }),
+  });
+}
+
 
 export type PurchaseImageInfo = {
   name: string;

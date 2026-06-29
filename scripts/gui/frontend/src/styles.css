@@ -676,6 +676,86 @@ body {
   background: #f1f5f9;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(15 23 42 / 0.36);
+}
+
+.modal-panel {
+  width: min(980px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #fff;
+  padding: 16px;
+  box-shadow: 0 24px 60px rgb(15 23 42 / 0.22);
+}
+
+.docs-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.docs-drop-zone {
+  min-height: 120px;
+}
+
+.docs-table-wrap {
+  overflow: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+
+.docs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.docs-table th,
+.docs-table td {
+  padding: 10px;
+  border-bottom: 1px solid #eef2f7;
+  text-align: left;
+  vertical-align: top;
+}
+
+.docs-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+}
+
+.docs-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.docs-table td strong,
+.docs-table td span {
+  display: block;
+}
+
+.docs-table td span {
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.docs-table select {
+  min-width: 150px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #fff;
+}
+
 .image-helper-panel {
   min-height: calc(100vh - 150px);
 }
